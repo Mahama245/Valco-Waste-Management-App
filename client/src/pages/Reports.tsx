@@ -171,7 +171,7 @@ function WasteReport({ data }: { data: any }) {
             <CartesianGrid strokeDasharray="3 3" stroke="#262B30" horizontal={false} />
             <XAxis type="number" stroke="#6B7076" fontSize={11} />
             <YAxis dataKey="waste_type" type="category" width={90} stroke="#6B7076" fontSize={11} />
-            <Tooltip contentStyle={{ background: "#1C2024", border: "1px solid #343B42", fontSize: 12 }} formatter={(v: number) => `${Math.round(v).toLocaleString()} kg`} />
+            <Tooltip contentStyle={{ background: "#1C2024", border: "1px solid #343B42", fontSize: 12 }} formatter={(v: any) => `${Math.round(v).toLocaleString()} kg`} />
             <Bar dataKey="total_kg" fill="#C9A24B" />
           </BarChart>
         </ResponsiveContainer>
