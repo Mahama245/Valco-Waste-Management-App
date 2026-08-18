@@ -128,7 +128,7 @@ export default function Dashboard() {
               </Pie>
               <Tooltip
                 contentStyle={{ background: "#1C2024", border: "1px solid #343B42", fontSize: 12 }}
-                formatter={(value: number) => `${Number(value).toLocaleString()} kg`}
+                formatter={(value: any) => `${Number(value).toLocaleString()} kg`}
               />
               <Legend wrapperStyle={{ fontSize: 10 }} />
             </PieChart>
