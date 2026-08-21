@@ -16,6 +16,8 @@ import RouteDetail from "./pages/RouteDetail";
 import MyDay from "./pages/MyDay";
 import Reports from "./pages/Reports";
 import Insights from "./pages/Insights";
+import Signup from "./pages/Signup";
+import DriverToday from "./pages/DriverToday";
 
 export default function App() {
   return (
@@ -23,6 +25,7 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/signup" element={<Signup />} />
           <Route
             path="/"
             element={
@@ -40,6 +43,7 @@ export default function App() {
             <Route path="routes" element={<RoutesPage />} />
             <Route path="routes/:id" element={<RouteDetail />} />
             <Route path="my-day" element={<MyDay />} />
+            <Route path="my-vehicle" element={<DriverToday />} />
             <Route path="reports" element={<Reports />} />
             <Route path="insights" element={<Insights />} />
             <Route path="users" element={<Users />} />

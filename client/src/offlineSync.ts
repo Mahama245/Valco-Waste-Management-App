@@ -14,6 +14,7 @@ export interface PendingStop {
   status: "COMPLETED";
   arrived_at_client: string; // ISO timestamp, stamped locally at time of check-in
   route_id: number;
+  scanned_code?: string;
 }
 
 export function getQueue(): PendingStop[] {

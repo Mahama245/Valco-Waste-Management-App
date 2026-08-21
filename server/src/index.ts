@@ -17,6 +17,7 @@ import notificationRoutes from "./routes/notifications";
 import routeRoutes from "./routes/routes";
 import reportRoutes from "./routes/reports";
 import insightRoutes from "./routes/insights";
+import confirmationRoutes from "./routes/confirmations";
 
 dotenv.config();
 
@@ -45,6 +46,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/routes", routeRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/insights", insightRoutes);
+app.use("/api/confirmations", confirmationRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found." });

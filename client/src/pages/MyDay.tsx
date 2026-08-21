@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../AuthContext";
 import { getQueue, isStopPending, queueStopCompletion, trySync } from "../offlineSync";
+import QrScanner from "../components/QrScanner";
 
 interface Stop {
   id: number;
@@ -13,6 +14,8 @@ interface Stop {
   priority: string;
   scheduled_time: string;
   zone_name: string;
+  bin_id: number | null;
+  scan_verified: boolean;
 }
 interface RouteDetail {
   id: number;
@@ -29,6 +32,8 @@ export default function MyDay() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [pendingCount, setPendingCount] = useState(getQueue().length);
   const [syncing, setSyncing] = useState(false);
+  const [scanningStop, setScanningStop] = useState<Stop | null>(null);
+  const [scanMismatch, setScanMismatch] = useState<{ stop: Stop; scannedCode: string } | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -80,7 +85,7 @@ export default function MyDay() {
     };
   }, [runSync]);
 
-  async function checkIn(stop: Stop) {
+  async function completeStop(stop: Stop, scannedCode?: string) {
     const nowIso = new Date().toISOString();
 
     // Optimistically update the UI immediately, whether online or not
@@ -88,15 +93,38 @@ export default function MyDay() {
 
     if (navigator.onLine) {
       try {
-        await api.patch(`/routes/stops/${stop.id}`, { status: "COMPLETED", arrived_at: nowIso });
+        const res = await api.patch(`/routes/stops/${stop.id}`, {
+          status: "COMPLETED",
+          arrived_at: nowIso,
+          scanned_code: scannedCode,
+        });
+        if (scannedCode && !res.data.scan_verified) {
+          // scanned something, but it didn't match this stop's assigned bin —
+          // still marked complete (collector was physically there), but flagged
+          setScanMismatch({ stop, scannedCode });
+        }
         return;
       } catch {
         // fall through to offline queue if the request fails
       }
     }
 
-    queueStopCompletion({ stop_id: stop.id, status: "COMPLETED", arrived_at_client: nowIso, route_id: route!.id });
+    queueStopCompletion({ stop_id: stop.id, status: "COMPLETED", arrived_at_client: nowIso, route_id: route!.id, scanned_code: scannedCode });
     setPendingCount(getQueue().length);
+  }
+
+  function startCheckIn(stop: Stop) {
+    if (stop.bin_id) {
+      setScanningStop(stop);
+    } else {
+      // no bin assigned to this stop — no QR to scan against, fall back to manual check-in
+      completeStop(stop);
+    }
+  }
+
+  function handleScanResult(code: string) {
+    if (scanningStop) completeStop(scanningStop, code);
+    setScanningStop(null);
   }
 
   const completed = stops.filter((s) => s.status === "COMPLETED").length;
@@ -104,6 +132,26 @@ export default function MyDay() {
 
   return (
     <div className="max-w-md mx-auto space-y-4 pb-6">
+      {scanningStop && <QrScanner onScan={handleScanResult} onClose={() => setScanningStop(null)} />}
+
+      {scanMismatch && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+          <div className="bg-graphite-800 border border-status-warning/40 rounded-sm p-5 w-full max-w-sm text-center">
+            <p className="text-status-warning text-sm font-medium mb-2">Scanned code doesn't match</p>
+            <p className="text-xs text-gray-400 mb-4">
+              This stop was marked collected, but the QR code you scanned ({scanMismatch.scannedCode}) doesn't match
+              the bin assigned to this stop. A supervisor will see this flagged in the record.
+            </p>
+            <button
+              onClick={() => setScanMismatch(null)}
+              className="text-sm bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* connectivity banner */}
       {!isOnline && (
         <div className="bg-status-warningBg border border-status-warning/30 text-status-warning text-xs px-3 py-2 rounded-sm text-center">
@@ -180,15 +228,15 @@ export default function MyDay() {
                     <p className="text-[11px] text-gray-500">{s.scheduled_time} · {s.waste_type?.replace("_", " ")}</p>
                   </div>
                   {s.status === "COMPLETED" ? (
-                    <span className={`text-[10px] uppercase px-2 py-1 rounded-sm shrink-0 ${pending ? "bg-status-warningBg text-status-warning" : "bg-status-successBg text-status-success"}`}>
-                      {pending ? "Pending Sync" : "Done"}
+                    <span className={`text-[10px] uppercase px-2 py-1 rounded-sm shrink-0 ${pending ? "bg-status-warningBg text-status-warning" : s.scan_verified ? "bg-status-successBg text-status-success" : "bg-graphite-700 text-gray-400"}`}>
+                      {pending ? "Pending Sync" : s.scan_verified ? "✓ QR Verified" : "Done"}
                     </span>
                   ) : (
                     <button
-                      onClick={() => checkIn(s)}
-                      className="shrink-0 text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-200 px-3 py-2 rounded-sm"
+                      onClick={() => startCheckIn(s)}
+                      className="shrink-0 text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-200 px-3 py-2 rounded-sm flex items-center gap-1.5"
                     >
-                      Check In
+                      {s.bin_id ? "📷 Scan QR" : "Check In"}
                     </button>
                   )}
                 </div>

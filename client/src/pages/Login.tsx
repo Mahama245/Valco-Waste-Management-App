@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../AuthContext";
 
 export default function Login() {
@@ -93,6 +93,11 @@ export default function Login() {
           <p className="mt-6 text-xs text-gray-500 leading-relaxed border-t border-graphite-700 pt-4">
             Demo accounts (password: <span className="font-mono text-gray-400">Demo@2026</span>): superadmin,
             wastemanager, supervisor, hseofficer, collector1, resident1
+          </p>
+
+          <p className="mt-3 text-xs text-gray-500 text-center">
+            Resident?{" "}
+            <Link to="/signup" className="text-gold-500 hover:underline">Create an account</Link>
           </p>
         </form>
       </div>

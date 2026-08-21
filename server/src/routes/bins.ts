@@ -76,4 +76,14 @@ router.patch("/:id/collected", authenticate, authorize(...MANAGE_ROLES, "COLLECT
   res.json({ bin: result.rows[0] });
 });
 
+router.get("/by-code/:code", authenticate, async (req, res) => {
+  const result = await pool.query(
+    `SELECT b.id, b.bin_code, b.location, z.name AS zone_name, b.waste_type, b.fill_level_pct, b.status
+     FROM bins b JOIN zones z ON z.id = b.zone_id WHERE b.bin_code = $1`,
+    [req.params.code]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: "No bin with that code." });
+  res.json({ bin: result.rows[0] });
+});
+
 export default router;

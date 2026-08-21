@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { api } from "../api";
 import { useAuth } from "../AuthContext";
 
@@ -29,6 +30,7 @@ export default function Bins() {
   const [statusFilter, setStatusFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [qrBin, setQrBin] = useState<Bin | null>(null);
   const canManage = user && MANAGE_ROLES.includes(user.role);
 
   function load() {
@@ -122,11 +124,47 @@ export default function Bins() {
                     {busyId === b.id ? "Recording..." : "Mark as Collected"}
                   </button>
                 )}
+
+                <button
+                  onClick={() => setQrBin(b)}
+                  className="mt-2 w-full text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-300 rounded-sm py-1.5"
+                >
+                  🔲 Show QR Code
+                </button>
               </div>
             );
           })
         )}
       </div>
+
+      {qrBin && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-sm p-6 w-full max-w-xs text-center print:shadow-none" id="bin-qr-print">
+            <p className="font-display text-lg font-semibold text-graphite-950 mb-1">{qrBin.bin_code}</p>
+            <p className="text-xs text-graphite-600 mb-4">{qrBin.zone_name}</p>
+            <div className="flex justify-center mb-4">
+              <QRCodeSVG value={qrBin.bin_code} size={200} />
+            </div>
+            <p className="text-[11px] text-graphite-500 mb-4">
+              Print and attach this to the physical bin. Collectors scan it to confirm pickup.
+            </p>
+            <div className="flex gap-2 print:hidden">
+              <button
+                onClick={() => window.print()}
+                className="flex-1 text-sm bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold py-2 rounded-sm"
+              >
+                Print
+              </button>
+              <button
+                onClick={() => setQrBin(null)}
+                className="flex-1 text-sm bg-graphite-200 hover:bg-graphite-300 text-graphite-800 font-semibold py-2 rounded-sm"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

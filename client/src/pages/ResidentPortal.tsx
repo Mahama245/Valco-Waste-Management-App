@@ -13,6 +13,17 @@ interface Complaint {
   created_at: string;
 }
 
+interface RecentCollection {
+  id: number;
+  collection_code: string;
+  location: string;
+  actual_pickup_time: string | null;
+  waste_type: string;
+  confirmation_id: number | null;
+  rating: number | null;
+  comment: string | null;
+}
+
 const CATEGORIES = [
   { value: "missed_collection", label: "Missed Collection" },
   { value: "overflowing_bin", label: "Overflowing Bin" },
@@ -23,14 +34,28 @@ const CATEGORIES = [
 
 export default function ResidentPortal() {
   const [complaints, setComplaints] = useState<Complaint[]>([]);
+  const [recent, setRecent] = useState<RecentCollection[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(true);
 
   function load() {
     setLoading(true);
-    api.get("/complaints").then((res) => setComplaints(res.data.complaints)).finally(() => setLoading(false));
+    Promise.all([
+      api.get("/complaints"),
+      api.get("/confirmations/recent-in-my-zone"),
+    ])
+      .then(([c, r]) => {
+        setComplaints(c.data.complaints);
+        setRecent(r.data.collections);
+      })
+      .finally(() => setLoading(false));
   }
   useEffect(load, []);
+
+  async function submitConfirmation(collectionId: number, rating: number) {
+    await api.post("/confirmations", { collection_id: collectionId, rating });
+    load();
+  }
 
   return (
     <div className="space-y-6 max-w-2xl">
@@ -44,6 +69,44 @@ export default function ResidentPortal() {
         <p className="font-display text-2xl text-white">Monday</p>
         <p className="text-sm text-gray-400">7:00 AM – 9:00 AM</p>
       </div>
+
+      {recent.length > 0 && (
+        <div>
+          <h2 className="font-display text-lg text-white mb-3">Confirm Recent Collections</h2>
+          <div className="space-y-2">
+            {recent.map((c) => (
+              <div key={c.id} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-mono text-xs text-gold-500">{c.collection_code}</span>
+                  <span className="text-[11px] text-gray-500">
+                    {c.actual_pickup_time ? new Date(c.actual_pickup_time).toLocaleDateString() : "—"}
+                  </span>
+                </div>
+                <p className="text-sm text-gray-200 mb-2">{c.location} · {c.waste_type?.replace("_", " ")}</p>
+                {c.confirmation_id ? (
+                  <p className="text-xs text-status-success">
+                    ✓ You confirmed this {c.rating ? `— rated ${c.rating}/5` : ""}
+                  </p>
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <span className="text-[11px] text-gray-400 mr-1">Confirm & rate:</span>
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => submitConfirmation(c.id, n)}
+                        className="text-lg text-gray-600 hover:text-gold-500 transition-colors"
+                        title={`${n} star${n > 1 ? "s" : ""}`}
+                      >
+                        ★
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center justify-between">
         <h2 className="font-display text-lg text-white">My Reports</h2>

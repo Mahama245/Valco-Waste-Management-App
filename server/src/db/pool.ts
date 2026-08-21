@@ -6,6 +6,8 @@ const isLocal = (process.env.DATABASE_URL || "").includes("localhost");
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  // Managed Postgres providers (Neon, Render Postgres, Supabase, etc.) require
+  // SSL. Skip it only for local development against a local database.
   ssl: isLocal ? false : { rejectUnauthorized: false },
 });
 

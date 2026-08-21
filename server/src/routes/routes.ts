@@ -40,6 +40,43 @@ router.get("/", authenticate, async (req: AuthedRequest, res) => {
 });
 
 // Full detail for one route including ordered stops with collection info
+// Driver's view: their assigned vehicle + today's route on that vehicle, if any.
+// Must be registered before GET /:id, or Express will try to parse
+// "my-vehicle-today" as a numeric id and fail.
+router.get("/my-vehicle-today", authenticate, async (req: AuthedRequest, res) => {
+  const vehicle = await pool.query(
+    `SELECT id, registration_number, vehicle_type, status, capacity_kg, fuel_type, mileage_km,
+            insurance_expiry, roadworthy_expiry, maintenance_due, current_lat, current_lng,
+            speed_kmh, trip_distance_km, last_gps_update
+     FROM vehicles WHERE driver_id = $1 LIMIT 1`,
+    [req.user!.id]
+  );
+  if (!vehicle.rows[0]) return res.json({ vehicle: null, route: null, stops: [] });
+
+  const today = new Date().toISOString().slice(0, 10);
+  const route = await pool.query(
+    `SELECT r.*, u.full_name AS collector_name
+     FROM routes r LEFT JOIN users u ON u.id = r.collector_id
+     WHERE r.vehicle_id = $1 AND r.scheduled_date = $2 LIMIT 1`,
+    [vehicle.rows[0].id, today]
+  );
+
+  let stops: any[] = [];
+  if (route.rows[0]) {
+    const stopsRes = await pool.query(
+      `SELECT rs.id, rs.stop_order, rs.status, c.collection_code, c.location, c.waste_type, c.scheduled_time, z.name AS zone_name
+       FROM route_stops rs
+       LEFT JOIN collections c ON c.id = rs.collection_id
+       LEFT JOIN zones z ON z.id = c.zone_id
+       WHERE rs.route_id = $1 ORDER BY rs.stop_order`,
+      [route.rows[0].id]
+    );
+    stops = stopsRes.rows;
+  }
+
+  res.json({ vehicle: vehicle.rows[0], route: route.rows[0] || null, stops });
+});
+
 router.get("/:id", authenticate, async (req: AuthedRequest, res) => {
   const routeRes = await pool.query(
     `SELECT r.*, u.full_name AS collector_name, v.registration_number AS vehicle_reg
@@ -148,9 +185,12 @@ router.patch("/:id/reorder", authenticate, authorize(...MANAGE_ROLES), async (re
   }
 });
 
-// Single-stop update — used for ONLINE completions
+// Single-stop update — used for ONLINE completions. If the stop has a bin_id
+// assigned, scanned_code must match that bin's bin_code for scan_verified to
+// be true — but completion is still allowed without a match (e.g. a bin was
+// physically swapped), it just won't show as QR-verified in the audit trail.
 router.patch("/stops/:stopId", authenticate, async (req: AuthedRequest, res) => {
-  const { status, arrived_at } = req.body || {};
+  const { status, arrived_at, scanned_code } = req.body || {};
 
   if (req.user!.role === "COLLECTOR") {
     const owns = await pool.query(
@@ -161,9 +201,22 @@ router.patch("/stops/:stopId", authenticate, async (req: AuthedRequest, res) => 
     if (!owns.rows[0]) return res.status(403).json({ error: "You can only update your own stops." });
   }
 
+  let scanVerified = false;
+  if (scanned_code) {
+    const stopBin = await pool.query(
+      `SELECT b.bin_code FROM route_stops rs JOIN bins b ON b.id = rs.bin_id WHERE rs.id = $1`,
+      [req.params.stopId]
+    );
+    scanVerified = !!stopBin.rows[0] && stopBin.rows[0].bin_code === scanned_code;
+  }
+
   const result = await pool.query(
-    `UPDATE route_stops SET status = COALESCE($1, status), arrived_at = COALESCE($2, arrived_at), synced = true WHERE id = $3 RETURNING *`,
-    [status, arrived_at, req.params.stopId]
+    `UPDATE route_stops
+     SET status = COALESCE($1, status), arrived_at = COALESCE($2, arrived_at),
+         scanned_code = COALESCE($3, scanned_code), scan_verified = scan_verified OR $4,
+         synced = true
+     WHERE id = $5 RETURNING *`,
+    [status, arrived_at, scanned_code || null, scanVerified, req.params.stopId]
   );
   if (!result.rows[0]) return res.status(404).json({ error: "Stop not found." });
 
@@ -177,6 +230,15 @@ router.patch("/stops/:stopId", authenticate, async (req: AuthedRequest, res) => 
     await pool.query(`UPDATE routes SET status = 'COMPLETED', completed_at = now() WHERE id = $1`, [route.rows[0].id]);
   }
 
+  res.json({ stop: result.rows[0], scan_verified: scanVerified });
+});
+
+// Supervisors assign which physical bin a stop corresponds to, so the
+// collector's QR scan has something concrete to verify against.
+router.patch("/stops/:stopId/bin", authenticate, authorize("SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"), async (req: AuthedRequest, res) => {
+  const { bin_id } = req.body || {};
+  const result = await pool.query(`UPDATE route_stops SET bin_id = $1 WHERE id = $2 RETURNING *`, [bin_id || null, req.params.stopId]);
+  if (!result.rows[0]) return res.status(404).json({ error: "Stop not found." });
   res.json({ stop: result.rows[0] });
 });
 
@@ -204,9 +266,21 @@ router.post("/sync", authenticate, async (req: AuthedRequest, res) => {
         }
       }
 
+      let scanVerified = false;
+      if (item.scanned_code) {
+        const stopBin = await pool.query(
+          `SELECT b.bin_code FROM route_stops rs JOIN bins b ON b.id = rs.bin_id WHERE rs.id = $1`,
+          [item.stop_id]
+        );
+        scanVerified = !!stopBin.rows[0] && stopBin.rows[0].bin_code === item.scanned_code;
+      }
+
       const result = await pool.query(
-        `UPDATE route_stops SET status = $1, arrived_at = $2, synced = true WHERE id = $3 RETURNING id, route_id, status`,
-        [item.status, item.arrived_at_client, item.stop_id]
+        `UPDATE route_stops
+         SET status = $1, arrived_at = $2, scanned_code = COALESCE($3, scanned_code),
+             scan_verified = scan_verified OR $4, synced = true
+         WHERE id = $5 RETURNING id, route_id, status`,
+        [item.status, item.arrived_at_client, item.scanned_code || null, scanVerified, item.stop_id]
       );
       if (result.rows[0]) {
         const route = await pool.query(

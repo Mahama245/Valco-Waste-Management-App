@@ -42,6 +42,7 @@ const NAV_ITEMS: NavItem[] = [
     roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"],
   },
   { to: "/my-day", label: "My Day", code: "DAY", roles: ["COLLECTOR"] },
+  { to: "/my-vehicle", label: "My Vehicle", code: "VEH", roles: ["DRIVER"] },
   { to: "/portal", label: "My Reports", code: "RES", roles: ["RESIDENT"] },
   {
     to: "/reports",

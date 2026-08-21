@@ -59,4 +59,51 @@ router.get("/me", authenticate, async (req: AuthedRequest, res) => {
   res.json({ user: req.user });
 });
 
+// Public self-registration — residents only. Staff accounts (collectors,
+// supervisors, admins, etc.) are still created by an administrator via
+// /api/users, never through this open endpoint.
+router.post("/register", async (req, res) => {
+  try {
+    const { full_name, username, password, email, zone_id } = req.body || {};
+    if (!full_name || !username || !password) {
+      return res.status(400).json({ error: "full_name, username, and password are required." });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters." });
+    }
+    const clean = String(username).trim().toLowerCase();
+
+    const existing = await pool.query("SELECT id FROM users WHERE username = $1", [clean]);
+    if (existing.rows[0]) return res.status(409).json({ error: "That username is already taken." });
+
+    const hash = bcrypt.hashSync(password, 10);
+    const result = await pool.query(
+      `INSERT INTO users (full_name, username, email, password_hash, role, department, zone_id)
+       VALUES ($1, $2, $3, $4, 'RESIDENT', 'Resident', $5)
+       RETURNING id, full_name, username, role`,
+      [full_name, clean, email || null, hash, zone_id || null]
+    );
+
+    const user = result.rows[0];
+    const token = signToken({ id: user.id, username: user.username, role: user.role, fullName: user.full_name });
+
+    await logAudit({
+      userId: user.id,
+      action: "CREATE",
+      recordType: "user",
+      recordId: user.id,
+      description: `${full_name} self-registered as a Resident.`,
+      ip: req.ip,
+    });
+
+    res.status(201).json({
+      token,
+      user: { id: user.id, username: user.username, fullName: user.full_name, role: user.role },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error during registration." });
+  }
+});
+
 export default router;
