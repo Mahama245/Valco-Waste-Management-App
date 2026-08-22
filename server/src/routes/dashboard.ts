@@ -56,7 +56,6 @@ router.get("/summary", authenticate, async (_req, res) => {
   const efficiency = scheduledToday > 0 ? Math.round((completedToday / scheduledToday) * 1000) / 10 : 0;
 
   res.json({
-    demo: true,
     kpis: {
       scheduled_today: scheduledToday,
       completed_today: completedToday,

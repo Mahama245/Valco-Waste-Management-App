@@ -106,13 +106,6 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-
-        <div className="p-4 border-t border-graphite-700">
-          <p className="text-xs uppercase tracking-wider text-gray-500 mb-1">DEMO DATA</p>
-          <p className="text-[11px] text-gray-600 leading-relaxed">
-            Figures shown are simulated for demonstration purposes.
-          </p>
-        </div>
       </aside>
 
       {/* Main */}

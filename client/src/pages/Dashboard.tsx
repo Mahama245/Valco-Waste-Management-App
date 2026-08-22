@@ -7,7 +7,6 @@ import { api } from "../api";
 import KpiCard from "../components/KpiCard";
 
 interface Summary {
-  demo: boolean;
   kpis: {
     scheduled_today: number;
     completed_today: number;
@@ -58,14 +57,9 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Waste Operations</p>
-          <h1 className="font-display text-2xl font-semibold text-white">Command Center</h1>
-        </div>
-        <span className="text-[11px] uppercase tracking-wider bg-gold-500/10 text-gold-500 border border-gold-500/30 px-2.5 py-1 rounded-sm">
-          Demo Data
-        </span>
+      <div>
+        <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Waste Operations</p>
+        <h1 className="font-display text-2xl font-semibold text-white">Command Center</h1>
       </div>
 
       {/* Top KPI row */}
