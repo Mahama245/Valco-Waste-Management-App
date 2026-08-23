@@ -86,4 +86,93 @@ router.get("/by-code/:code", authenticate, async (req, res) => {
   res.json({ bin: result.rows[0] });
 });
 
+// Create a new bin (a new physical collection point / location).
+router.post("/", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
+  const { zone_id, location, waste_type, capacity_liters, lat, lng } = req.body || {};
+  if (!zone_id || !location) {
+    return res.status(400).json({ error: "zone_id and location are required." });
+  }
+
+  const countRes = await pool.query("SELECT COUNT(*)::int AS n FROM bins");
+  const binCode = `WM-BIN-${String(10000 + countRes.rows[0].n + 1)}`;
+
+  const result = await pool.query(
+    `INSERT INTO bins (bin_code, zone_id, location, lat, lng, waste_type, capacity_liters)
+     VALUES ($1,$2,$3,$4,$5,COALESCE($6,'GENERAL')::waste_type,COALESCE($7,1100))
+     RETURNING *`,
+    [binCode, zone_id, location, lat || null, lng || null, waste_type, capacity_liters]
+  );
+
+  await logAudit({
+    userId: req.user!.id,
+    action: "CREATE",
+    recordType: "bin",
+    recordId: result.rows[0].id,
+    description: `${req.user!.fullName} (${req.user!.role}) added a new collection point: ${binCode} at ${location}.`,
+    ip: req.ip,
+  });
+
+  res.status(201).json({ bin: result.rows[0] });
+});
+
+// Edit an existing bin's details (location, zone, waste type, capacity, coordinates).
+router.patch("/:id", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
+  const { zone_id, location, waste_type, capacity_liters, lat, lng, condition } = req.body || {};
+
+  const before = await pool.query("SELECT * FROM bins WHERE id = $1", [req.params.id]);
+  if (!before.rows[0]) return res.status(404).json({ error: "Bin not found." });
+
+  const result = await pool.query(
+    `UPDATE bins SET
+       zone_id = COALESCE($1, zone_id),
+       location = COALESCE($2, location),
+       waste_type = COALESCE($3, waste_type),
+       capacity_liters = COALESCE($4, capacity_liters),
+       lat = COALESCE($5, lat),
+       lng = COALESCE($6, lng),
+       condition = COALESCE($7, condition),
+       updated_at = now()
+     WHERE id = $8 RETURNING *`,
+    [zone_id, location, waste_type, capacity_liters, lat, lng, condition, req.params.id]
+  );
+
+  await logAudit({
+    userId: req.user!.id,
+    action: "UPDATE",
+    recordType: "bin",
+    recordId: Number(req.params.id),
+    description: `${req.user!.fullName} (${req.user!.role}) updated collection point ${before.rows[0].bin_code}.`,
+    previousValue: before.rows[0],
+    newValue: result.rows[0],
+    ip: req.ip,
+  });
+
+  res.json({ bin: result.rows[0] });
+});
+
+// Remove a bin that no longer exists physically (e.g. decommissioned location).
+router.delete("/:id", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
+  try {
+    const result = await pool.query("DELETE FROM bins WHERE id = $1 RETURNING bin_code, location", [req.params.id]);
+    if (!result.rows[0]) return res.status(404).json({ error: "Bin not found." });
+
+    await logAudit({
+      userId: req.user!.id,
+      action: "DELETE",
+      recordType: "bin",
+      recordId: Number(req.params.id),
+      description: `${req.user!.fullName} (${req.user!.role}) removed collection point ${result.rows[0].bin_code} (${result.rows[0].location}).`,
+      ip: req.ip,
+    });
+
+    res.json({ ok: true });
+  } catch (err: any) {
+    if (err.code === "23503") {
+      return res.status(409).json({ error: "This bin is still assigned to one or more routes. Unassign it from those stops first." });
+    }
+    console.error(err);
+    res.status(500).json({ error: "Couldn't remove this collection point." });
+  }
+});
+
 export default router;

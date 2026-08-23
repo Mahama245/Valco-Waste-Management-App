@@ -18,6 +18,7 @@ import Reports from "./pages/Reports";
 import Insights from "./pages/Insights";
 import Signup from "./pages/Signup";
 import DriverToday from "./pages/DriverToday";
+import PrintQrCodes from "./pages/PrintQrCodes";
 
 export default function App() {
   return (
@@ -38,6 +39,7 @@ export default function App() {
             <Route path="collections" element={<Collections />} />
             <Route path="map" element={<OperationsMap />} />
             <Route path="bins" element={<Bins />} />
+            <Route path="bins/print-qr" element={<PrintQrCodes />} />
             <Route path="incidents" element={<Incidents />} />
             <Route path="portal" element={<ResidentPortal />} />
             <Route path="routes" element={<RoutesPage />} />
