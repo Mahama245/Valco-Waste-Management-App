@@ -45,6 +45,9 @@ router.post("/", authenticate, authorize(...ADMIN_ROLES), async (req: AuthedRequ
 });
 
 router.patch("/:id/deactivate", authenticate, authorize(...ADMIN_ROLES), async (req: AuthedRequest, res) => {
+  if (Number(req.params.id) === req.user!.id) {
+    return res.status(400).json({ error: "You can't deactivate your own account." });
+  }
   const result = await pool.query("UPDATE users SET is_active = false, updated_at = now() WHERE id = $1 RETURNING full_name, role", [req.params.id]);
   if (!result.rows[0]) return res.status(404).json({ error: "User not found." });
   await logAudit({
@@ -56,6 +59,92 @@ router.patch("/:id/deactivate", authenticate, authorize(...ADMIN_ROLES), async (
     ip: req.ip,
   });
   res.json({ ok: true });
+});
+
+router.patch("/:id/reactivate", authenticate, authorize(...ADMIN_ROLES), async (req: AuthedRequest, res) => {
+  const result = await pool.query("UPDATE users SET is_active = true, updated_at = now() WHERE id = $1 RETURNING full_name, role", [req.params.id]);
+  if (!result.rows[0]) return res.status(404).json({ error: "User not found." });
+  await logAudit({
+    userId: req.user!.id,
+    action: "UPDATE",
+    recordType: "user",
+    recordId: Number(req.params.id),
+    description: `${req.user!.fullName} (${req.user!.role}) reactivated account for ${result.rows[0].full_name} (${result.rows[0].role}).`,
+    ip: req.ip,
+  });
+  res.json({ ok: true });
+});
+
+// Full edit — including changing someone's role (e.g. promoting to admin).
+router.patch("/:id", authenticate, authorize(...ADMIN_ROLES), async (req: AuthedRequest, res) => {
+  const { full_name, role, department, zone_id, email } = req.body || {};
+
+  const before = await pool.query("SELECT * FROM users WHERE id = $1", [req.params.id]);
+  if (!before.rows[0]) return res.status(404).json({ error: "User not found." });
+
+  if (Number(req.params.id) === req.user!.id && role && role !== before.rows[0].role) {
+    return res.status(400).json({ error: "You can't change your own role. Have another admin do it." });
+  }
+
+  const result = await pool.query(
+    `UPDATE users SET
+       full_name = COALESCE($1, full_name),
+       role = COALESCE($2, role),
+       department = COALESCE($3, department),
+       zone_id = COALESCE($4, zone_id),
+       email = COALESCE($5, email),
+       updated_at = now()
+     WHERE id = $6
+     RETURNING id, full_name, username, email, role, department, is_active`,
+    [full_name, role, department, zone_id, email, req.params.id]
+  );
+
+  await logAudit({
+    userId: req.user!.id,
+    action: "UPDATE",
+    recordType: "user",
+    recordId: Number(req.params.id),
+    description:
+      role && role !== before.rows[0].role
+        ? `${req.user!.fullName} (${req.user!.role}) changed ${before.rows[0].full_name}'s role from ${before.rows[0].role} to ${role}.`
+        : `${req.user!.fullName} (${req.user!.role}) updated ${before.rows[0].full_name}'s account details.`,
+    previousValue: before.rows[0],
+    newValue: result.rows[0],
+    ip: req.ip,
+  });
+
+  res.json({ user: result.rows[0] });
+});
+
+// Permanent delete. Blocked automatically if this account has historical
+// records attached (collections, audit entries, etc.) — deactivate instead
+// for anyone with real history; this is for cleaning up accounts that were
+// never actually used.
+router.delete("/:id", authenticate, authorize(...ADMIN_ROLES), async (req: AuthedRequest, res) => {
+  if (Number(req.params.id) === req.user!.id) {
+    return res.status(400).json({ error: "You can't delete your own account." });
+  }
+  try {
+    const result = await pool.query("DELETE FROM users WHERE id = $1 RETURNING full_name, role", [req.params.id]);
+    if (!result.rows[0]) return res.status(404).json({ error: "User not found." });
+
+    await logAudit({
+      userId: req.user!.id,
+      action: "DELETE",
+      recordType: "user",
+      recordId: Number(req.params.id),
+      description: `${req.user!.fullName} (${req.user!.role}) permanently deleted the account for ${result.rows[0].full_name} (${result.rows[0].role}).`,
+      ip: req.ip,
+    });
+
+    res.json({ ok: true });
+  } catch (err: any) {
+    if (err.code === "23503") {
+      return res.status(409).json({ error: "This account has history attached (collections, incidents, audit entries, etc.) and can't be permanently deleted. Deactivate it instead." });
+    }
+    console.error(err);
+    res.status(500).json({ error: "Couldn't delete this account." });
+  }
 });
 
 router.patch("/:id/reset-password", authenticate, authorize(...ADMIN_ROLES), async (req: AuthedRequest, res) => {

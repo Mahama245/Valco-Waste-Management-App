@@ -39,6 +39,7 @@ export default function Bins() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showZoneForm, setShowZoneForm] = useState(false);
   const [editingBin, setEditingBin] = useState<Bin | null>(null);
   const canManage = user && MANAGE_ROLES.includes(user.role);
   const canEdit = user && EDIT_ROLES.includes(user.role);
@@ -52,9 +53,10 @@ export default function Bins() {
   }
 
   useEffect(load, [statusFilter]);
-  useEffect(() => {
+  function loadZones() {
     api.get("/zones").then((res) => setZones(res.data.zones));
-  }, []);
+  }
+  useEffect(loadZones, []);
 
   async function markCollected(id: number) {
     setBusyId(id);
@@ -110,6 +112,14 @@ export default function Bins() {
           </Link>
           {canEdit && (
             <button
+              onClick={() => setShowZoneForm((s) => !s)}
+              className="text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-200 px-3 py-1.5 rounded-sm"
+            >
+              {showZoneForm ? "Cancel" : "+ Add Zone"}
+            </button>
+          )}
+          {canEdit && (
+            <button
               onClick={() => setShowAddForm((s) => !s)}
               className="text-xs bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold px-3 py-1.5 rounded-sm"
             >
@@ -119,6 +129,7 @@ export default function Bins() {
         </div>
       </div>
 
+      {showZoneForm && <ZoneForm onSaved={() => { setShowZoneForm(false); loadZones(); }} />}
       {showAddForm && <BinForm zones={zones} onSaved={() => { setShowAddForm(false); load(); }} />}
       {editingBin && (
         <BinForm
@@ -206,6 +217,62 @@ export default function Bins() {
         )}
       </div>
     </div>
+  );
+}
+
+function ZoneForm({ onSaved }: { onSaved: () => void }) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) {
+      setError("Zone name is required.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.post("/zones", { name: name.trim(), description: description.trim() || undefined });
+      onSaved();
+    } catch (err: any) {
+      setError(err.response?.data?.error || "Couldn't add this zone.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4 space-y-3">
+      <p className="text-sm text-white font-medium">Add a new zone / facility area</p>
+      {error && <div className="text-status-critical text-xs">{error}</div>}
+      <label className="block">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Zone name</span>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+          placeholder="e.g. New Warehouse Extension"
+        />
+      </label>
+      <label className="block">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Description (optional)</span>
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+        />
+      </label>
+      <button
+        type="submit"
+        disabled={submitting}
+        className="text-sm bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
+      >
+        {submitting ? "Saving..." : "Add zone"}
+      </button>
+    </form>
   );
 }
 
