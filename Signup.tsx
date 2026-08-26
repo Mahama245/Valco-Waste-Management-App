@@ -1,304 +1,154 @@
-import { useEffect, useState } from "react";
-import { api } from "../api";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useState } from "react";
 import { useAuth, ROLE_LABELS } from "../AuthContext";
+import NotificationBell from "../components/NotificationBell";
+import ChangePasswordModal from "../components/ChangePasswordModal";
 
-interface UserRow {
-  id: number;
-  full_name: string;
-  username: string;
-  email: string;
-  role: string;
-  department: string;
-  is_active: boolean;
-  last_login: string | null;
-  zone_name: string | null;
+interface NavItem {
+  to: string;
+  label: string;
+  code: string; // short code echoing the zone/collection code convention used elsewhere in the platform
+  roles: string[];
 }
 
-const ROLES = Object.keys(ROLE_LABELS);
+const NAV_ITEMS: NavItem[] = [
+  { to: "/", label: "Command Center", code: "CC", roles: ["*"] },
+  {
+    to: "/collections",
+    label: "Collections",
+    code: "WM",
+    roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "COLLECTOR", "CONTRACTOR"],
+  },
+  {
+    to: "/map",
+    label: "Operations Map",
+    code: "MAP",
+    roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "MANAGEMENT"],
+  },
+  {
+    to: "/bins",
+    label: "Smart Bins",
+    code: "BIN",
+    roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "COLLECTOR"],
+  },
+  {
+    to: "/incidents",
+    label: "Incidents",
+    code: "INC",
+    roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "HSE_OFFICER", "COLLECTOR", "DRIVER"],
+  },
+  {
+    to: "/routes",
+    label: "Route Management",
+    code: "RT",
+    roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"],
+  },
+  { to: "/my-day", label: "My Day", code: "DAY", roles: ["COLLECTOR"] },
+  { to: "/my-vehicle", label: "My Vehicle", code: "VEH", roles: ["DRIVER"] },
+  { to: "/portal", label: "My Reports", code: "RES", roles: ["RESIDENT"] },
+  {
+    to: "/reports",
+    label: "Reports & Analytics",
+    code: "RPT",
+    roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "MANAGEMENT"],
+  },
+  {
+    to: "/insights",
+    label: "Smart Insights",
+    code: "AI",
+    roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "MANAGEMENT"],
+  },
+  { to: "/users", label: "User Management", code: "USR", roles: ["SUPER_ADMIN", "ICT_ADMIN"] },
+  {
+    to: "/audit",
+    label: "Audit Log",
+    code: "LOG",
+    roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER"],
+  },
+];
 
-export default function Users() {
-  const { user: me } = useAuth();
-  const [users, setUsers] = useState<UserRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<number | null>(null);
-  const [editingUser, setEditingUser] = useState<UserRow | null>(null);
-  const [showAddForm, setShowAddForm] = useState(false);
+export default function Layout() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [showChangePassword, setShowChangePassword] = useState(false);
 
-  function load() {
-    setLoading(true);
-    api
-      .get("/users")
-      .then((res) => setUsers(res.data.users))
-      .catch(() => setError("Couldn't load users."))
-      .finally(() => setLoading(false));
-  }
+  if (!user) return null;
 
-  useEffect(load, []);
+  const items = NAV_ITEMS.filter((item) => item.roles.includes("*") || item.roles.includes(user.role));
 
-  async function deactivate(id: number) {
-    setBusyId(id);
-    try {
-      await api.patch(`/users/${id}/deactivate`);
-      load();
-    } catch (err: any) {
-      setError(err.response?.data?.error || "Couldn't deactivate this account.");
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function reactivate(id: number) {
-    setBusyId(id);
-    try {
-      await api.patch(`/users/${id}/reactivate`);
-      load();
-    } catch {
-      setError("Couldn't reactivate this account.");
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function deleteUser(id: number) {
-    if (!confirm("Permanently delete this account? This can't be undone.")) return;
-    setBusyId(id);
-    try {
-      await api.delete(`/users/${id}`);
-      load();
-    } catch (err: any) {
-      alert(err.response?.data?.error || "Couldn't delete this account.");
-    } finally {
-      setBusyId(null);
-    }
+  function handleLogout() {
+    logout();
+    navigate("/login");
   }
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Administration</p>
-          <h1 className="font-display text-2xl font-semibold text-white">User Management</h1>
+    <div className="min-h-screen bg-graphite-900 flex">
+      {/* Sidebar */}
+      <aside className="w-64 bg-graphite-800 border-r border-graphite-700 flex flex-col shrink-0">
+        <div className="h-16 flex items-center gap-2 px-5 border-b border-graphite-700">
+          <div className="w-1.5 h-6 bg-gold-500" />
+          <span className="font-display text-xl font-bold tracking-wide text-white">VALCO</span>
         </div>
-        <button
-          onClick={() => setShowAddForm((s) => !s)}
-          className="text-sm bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold px-3 py-1.5 rounded-sm"
-        >
-          {showAddForm ? "Cancel" : "+ Create Account"}
-        </button>
-      </div>
 
-      {error && <div className="text-status-critical text-sm">{error}</div>}
+        <nav className="flex-1 py-4">
+          {items.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === "/"}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-5 py-2.5 text-sm transition-colors border-l-2 ${
+                  isActive
+                    ? "border-gold-500 bg-graphite-700/60 text-white"
+                    : "border-transparent text-gray-400 hover:text-gray-200 hover:bg-graphite-700/30"
+                }`
+              }
+            >
+              <span className="font-mono text-[10px] text-gold-500/70 w-6">{item.code}</span>
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+      </aside>
 
-      {showAddForm && <UserForm onSaved={() => { setShowAddForm(false); load(); }} />}
-      {editingUser && (
-        <UserForm existing={editingUser} onSaved={() => { setEditingUser(null); load(); }} onCancel={() => setEditingUser(null)} />
-      )}
+      {/* Main */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="h-16 bg-graphite-800/60 border-b border-graphite-700 flex items-center justify-between px-6 shrink-0">
+          <div />
+          <div className="flex items-center gap-4">
+            <NotificationBell />
+            <div className="text-right">
+              <p className="text-sm text-white leading-tight">{user.fullName}</p>
+              <p className="text-[11px] text-gold-500 leading-tight">{ROLE_LABELS[user.role] || user.role}</p>
+            </div>
+            <div className="w-9 h-9 rounded-full bg-graphite-600 flex items-center justify-center text-sm font-semibold text-white">
+              {user.fullName
+                .split(" ")
+                .map((p) => p[0])
+                .slice(0, 2)
+                .join("")}
+            </div>
+            <button
+              onClick={() => setShowChangePassword(true)}
+              className="text-xs text-gray-400 hover:text-gold-500 border border-graphite-600 hover:border-gold-500/50 rounded-sm px-3 py-1.5 transition-colors"
+            >
+              Change Password
+            </button>
+            <button
+              onClick={handleLogout}
+              className="text-xs text-gray-400 hover:text-status-critical border border-graphite-600 hover:border-status-critical/50 rounded-sm px-3 py-1.5 transition-colors"
+            >
+              Log out
+            </button>
+          </div>
+        </header>
 
-      <div className="bg-graphite-800 border border-graphite-700 rounded-sm overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-graphite-700 text-left text-[11px] uppercase tracking-wider text-gray-400">
-              <th className="px-4 py-3 font-medium">Name</th>
-              <th className="px-4 py-3 font-medium">Username</th>
-              <th className="px-4 py-3 font-medium">Role</th>
-              <th className="px-4 py-3 font-medium">Department</th>
-              <th className="px-4 py-3 font-medium">Zone</th>
-              <th className="px-4 py-3 font-medium">Last Login</th>
-              <th className="px-4 py-3 font-medium">Status</th>
-              <th className="px-4 py-3 font-medium"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr>
-                <td colSpan={8} className="px-4 py-10 text-center text-gray-500">
-                  Loading users...
-                </td>
-              </tr>
-            ) : (
-              users.map((u) => (
-                <tr key={u.id} className="border-b border-graphite-700/60 last:border-0 hover:bg-graphite-700/20">
-                  <td className="px-4 py-2.5 text-gray-100">{u.full_name}</td>
-                  <td className="px-4 py-2.5 font-mono text-xs text-gray-400">{u.username}</td>
-                  <td className="px-4 py-2.5 text-gold-500 text-xs">{ROLE_LABELS[u.role] || u.role}</td>
-                  <td className="px-4 py-2.5 text-gray-300">{u.department || "—"}</td>
-                  <td className="px-4 py-2.5 text-gray-300">{u.zone_name || "—"}</td>
-                  <td className="px-4 py-2.5 text-gray-400 text-xs">
-                    {u.last_login ? new Date(u.last_login).toLocaleString() : "Never"}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span
-                      className={`text-[11px] px-2 py-0.5 rounded-sm border ${
-                        u.is_active
-                          ? "bg-status-successBg text-status-success border-status-success/30"
-                          : "bg-graphite-700 text-gray-500 border-graphite-600"
-                      }`}
-                    >
-                      {u.is_active ? "Active" : "Suspended"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <button onClick={() => setEditingUser(u)} className="text-xs text-gold-500 hover:underline">
-                        Edit
-                      </button>
-                      {u.is_active ? (
-                        u.id !== me?.id && (
-                          <button
-                            onClick={() => deactivate(u.id)}
-                            disabled={busyId === u.id}
-                            className="text-xs text-status-warning hover:underline disabled:opacity-50"
-                          >
-                            Suspend
-                          </button>
-                        )
-                      ) : (
-                        <button
-                          onClick={() => reactivate(u.id)}
-                          disabled={busyId === u.id}
-                          className="text-xs text-status-success hover:underline disabled:opacity-50"
-                        >
-                          Reactivate
-                        </button>
-                      )}
-                      {u.id !== me?.id && (
-                        <button
-                          onClick={() => deleteUser(u.id)}
-                          disabled={busyId === u.id}
-                          className="text-xs text-status-critical hover:underline disabled:opacity-50"
-                        >
-                          Delete
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+        {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
+
+        <main className="flex-1 overflow-y-auto p-6">
+          <Outlet />
+        </main>
       </div>
     </div>
-  );
-}
-
-function UserForm({
-  existing,
-  onSaved,
-  onCancel,
-}: {
-  existing?: UserRow;
-  onSaved: () => void;
-  onCancel?: () => void;
-}) {
-  const [fullName, setFullName] = useState(existing?.full_name || "");
-  const [username, setUsername] = useState(existing?.username || "");
-  const [password, setPassword] = useState("");
-  const [role, setRole] = useState(existing?.role || "COLLECTOR");
-  const [department, setDepartment] = useState(existing?.department || "");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setSubmitting(true);
-    try {
-      if (existing) {
-        await api.patch(`/users/${existing.id}`, { full_name: fullName, role, department });
-        if (password) {
-          await api.patch(`/users/${existing.id}/reset-password`, { new_password: password });
-        }
-      } else {
-        if (!username || !password) {
-          setError("Username and password are required for a new account.");
-          setSubmitting(false);
-          return;
-        }
-        await api.post("/users", { full_name: fullName, username, password, role, department });
-      }
-      onSaved();
-    } catch (err: any) {
-      setError(err.response?.data?.error || "Couldn't save this account.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <form onSubmit={submit} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4 space-y-3">
-      <p className="text-sm text-white font-medium">{existing ? `Edit ${existing.full_name}` : "Create a new account"}</p>
-      {error && <div className="text-status-critical text-xs">{error}</div>}
-      <div className="grid grid-cols-2 gap-3">
-        <label className="block">
-          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Full name</span>
-          <input
-            value={fullName}
-            onChange={(e) => setFullName(e.target.value)}
-            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-          />
-        </label>
-        <label className="block">
-          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">
-            Username {existing && <span className="normal-case text-gray-600">(can't be changed)</span>}
-          </span>
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            disabled={!!existing}
-            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white disabled:opacity-50"
-          />
-        </label>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <label className="block">
-          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Role</span>
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-          >
-            {ROLES.map((r) => (
-              <option key={r} value={r}>{ROLE_LABELS[r]}</option>
-            ))}
-          </select>
-        </label>
-        <label className="block">
-          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Department</span>
-          <input
-            value={department}
-            onChange={(e) => setDepartment(e.target.value)}
-            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-          />
-        </label>
-      </div>
-      <label className="block">
-        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">
-          {existing ? "Reset password (leave blank to keep current)" : "Password"}
-        </span>
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-          placeholder={existing ? "••••••••" : "At least 6 characters"}
-        />
-      </label>
-      <div className="flex gap-2">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="text-sm bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
-        >
-          {submitting ? "Saving..." : existing ? "Save changes" : "Create account"}
-        </button>
-        {onCancel && (
-          <button type="button" onClick={onCancel} className="text-sm text-gray-400 hover:text-white px-4 py-2">
-            Cancel
-          </button>
-        )}
-      </div>
-    </form>
   );
 }

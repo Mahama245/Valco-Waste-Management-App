@@ -1,26 +1,47 @@
--- Fixes the COUNT(*)+1 race condition in identifier generation
--- (WM-2026-xxxxxx, INC-2026-xxxxx, CMP-2026-xxxxx, RT-2026-xxx, WM-BIN-xxxxx).
--- Under concurrent requests, two users creating a collection at the same
--- moment could both read the same COUNT(*) and get the same ID. A
--- database-level atomic counter closes that gap.
+import { Request, Response, NextFunction } from "express";
+import jwt from "jsonwebtoken";
 
-CREATE TABLE id_counters (
-  counter_key VARCHAR(40) PRIMARY KEY,
-  next_value INTEGER NOT NULL DEFAULT 1
-);
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  // Fail safely at startup rather than silently signing tokens with a
+  // publicly-known default secret. A missing secret is a configuration
+  // error, not something to paper over.
+  throw new Error(
+    "FATAL: JWT_SECRET environment variable is not set. Set it in your .env file (local) or your host's Environment settings (production). Refusing to start with an insecure default."
+  );
+}
+// Already validated non-empty above; this explicit typing just satisfies
+// TS's control-flow narrowing, which doesn't propagate into the closures below.
+const SECRET: string = JWT_SECRET;
 
--- Seed each counter to continue from whatever's already been generated,
--- so existing identifiers are never reused or duplicated.
-INSERT INTO id_counters (counter_key, next_value)
-SELECT 'collection', COALESCE(MAX(id), 0) + 1 FROM collections
-UNION ALL
-SELECT 'incident', COALESCE(MAX(id), 0) + 1 FROM incidents
-UNION ALL
-SELECT 'complaint', COALESCE(MAX(id), 0) + 1 FROM complaints
-UNION ALL
-SELECT 'route', COALESCE(MAX(id), 0) + 1 FROM routes
-UNION ALL
-SELECT 'bin', COALESCE(MAX(id), 0) + 1 FROM bins
-UNION ALL
-SELECT 'zone', COALESCE(MAX(id), 0) + 1 FROM zones
-ON CONFLICT (counter_key) DO NOTHING;
+export interface AuthedRequest extends Request {
+  user?: { id: number; username: string; role: string; fullName: string };
+}
+
+export function authenticate(req: AuthedRequest, res: Response, next: NextFunction) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "Missing authentication token." });
+  try {
+    const payload = jwt.verify(token, SECRET) as any;
+    req.user = { id: payload.id, username: payload.username, role: payload.role, fullName: payload.fullName };
+    next();
+  } catch {
+    return res.status(401).json({ error: "Invalid or expired token." });
+  }
+}
+
+// Usage: authorize('SUPER_ADMIN', 'ICT_ADMIN')
+export function authorize(...allowedRoles: string[]) {
+  return (req: AuthedRequest, res: Response, next: NextFunction) => {
+    if (!req.user) return res.status(401).json({ error: "Not authenticated." });
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: "You don't have permission to perform this action." });
+    }
+    next();
+  };
+}
+
+export function signToken(user: { id: number; username: string; role: string; fullName: string }) {
+  return jwt.sign(user, SECRET, { expiresIn: "12h" });
+}

@@ -1,39 +1,65 @@
-{
-  "name": "server",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js",
-    "seed": "ts-node-dev --transpile-only src/db/seed.ts",
-    "seed:phase2": "ts-node-dev --transpile-only src/db/seed_phase2.ts",
-    "seed:phase3": "ts-node-dev --transpile-only src/db/seed_phase3.ts"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "bcryptjs": "^3.0.3",
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.6.2",
-    "helmet": "^8.3.0",
-    "jsonwebtoken": "^9.0.3",
-    "pg": "^8.23.0"
-  },
-  "devDependencies": {
-    "@types/bcryptjs": "^2.4.6",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/helmet": "^0.0.48",
-    "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^26.2.0",
-    "@types/pg": "^8.21.0",
-    "ts-node": "^10.9.2",
-    "ts-node-dev": "^2.0.0",
-    "typescript": "^5.6.3"
-  }
+import { useEffect, useRef, useState } from "react";
+import { Html5Qrcode } from "html5-qrcode";
+
+interface Props {
+  onScan: (code: string) => void;
+  onClose: () => void;
+}
+
+const SCANNER_ELEMENT_ID = "qr-reader-region";
+
+export default function QrScanner({ onScan, onClose }: Props) {
+  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(true);
+
+  useEffect(() => {
+    const scanner = new Html5Qrcode(SCANNER_ELEMENT_ID);
+    scannerRef.current = scanner;
+
+    scanner
+      .start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 240, height: 240 } },
+        (decodedText) => {
+          setScanning(false);
+          scanner.stop().catch(() => {});
+          onScan(decodedText);
+        },
+        () => {
+          // fired continuously while no code is found — expected, ignore
+        }
+      )
+      .catch(() => {
+        setError("Couldn't access the camera. Check your browser's camera permission for this site.");
+      });
+
+    return () => {
+      if (scannerRef.current) {
+        scannerRef.current.stop().catch(() => {});
+      }
+    };
+  }, [onScan]);
+
+  return (
+    <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+      <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-4 w-full max-w-sm">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-sm text-white font-medium">Scan bin QR code</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-white text-sm">
+            Cancel
+          </button>
+        </div>
+
+        {error ? (
+          <p className="text-status-critical text-sm py-8 text-center">{error}</p>
+        ) : (
+          <>
+            <div id={SCANNER_ELEMENT_ID} className="rounded-sm overflow-hidden bg-black" />
+            {scanning && <p className="text-xs text-gray-500 text-center mt-3">Point your camera at the bin's QR code.</p>}
+          </>
+        )}
+      </div>
+    </div>
+  );
 }

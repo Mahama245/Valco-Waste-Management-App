@@ -1,73 +1,218 @@
-// Offline-first sync queue for the collector mobile app.
-// Completed stops are written here immediately (works with or without a
-// network connection). A background sync attempt runs whenever the browser
-// comes back online, or on a timer as a fallback. Nothing here pretends to
-// sync when it hasn't — pending items stay visibly "Pending Sync" until the
-// server confirms them.
+import { useEffect, useState } from "react";
+import { MapContainer, TileLayer, CircleMarker, Popup } from "react-leaflet";
+import L from "leaflet";
+import { api } from "../api";
 
-import { api } from "./api";
+// Fix default marker icon paths (Vite/Leaflet packaging quirk) — we use
+// CircleMarker instead of the default pin icon, so this is just a safety net.
+delete (L.Icon.Default.prototype as any)._getIconUrl;
 
-const QUEUE_KEY_PREFIX = "valco_pending_stops_";
+interface Vehicle {
+  id: number;
+  registration_number: string;
+  status: string;
+  current_lat: string | null;
+  current_lng: string | null;
+  speed_kmh: string;
+  driver_name: string | null;
+}
+interface Bin {
+  id: number;
+  bin_code: string;
+  zone_name: string;
+  lat: string | null;
+  lng: string | null;
+  fill_level_pct: string;
+  status: string;
+}
+interface Incident {
+  id: number;
+  ticket_number: string;
+  location: string;
+  lat: string | null;
+  lng: string | null;
+  severity: string;
+  status: string;
+}
 
-// Keyed per logged-in user, not globally, so if two collectors share a
-// tablet or handset at the depot, one collector's offline check-ins never
-// bleed into another's queue or get synced under the wrong account.
-function queueKey(): string {
-  try {
-    const raw = localStorage.getItem("valco_user");
-    const user = raw ? JSON.parse(raw) : null;
-    return `${QUEUE_KEY_PREFIX}${user?.id ?? "anonymous"}`;
-  } catch {
-    return `${QUEUE_KEY_PREFIX}anonymous`;
+const VEHICLE_COLOR = "#5A9BD8";
+const BIN_COLORS: Record<string, string> = { NORMAL: "#3FA34D", NEAR_CAPACITY: "#E8A93B", CRITICAL: "#E5555A", OUT_OF_SERVICE: "#6B7076" };
+const INCIDENT_COLOR = "#E5555A";
+
+const TEMA_CENTER: [number, number] = [5.669, 0.017];
+
+export default function OperationsMap() {
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [bins, setBins] = useState<Bin[]>([]);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [layers, setLayers] = useState({ vehicles: true, bins: true, incidents: true });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  function load() {
+    setLoading(true);
+    setError(null);
+    Promise.all([api.get("/vehicles"), api.get("/bins"), api.get("/incidents", { params: { status: "NEW" } })])
+      .then(([v, b, i]) => {
+        setVehicles(v.data.vehicles);
+        setBins(b.data.bins);
+        setIncidents(i.data.incidents);
+      })
+      .catch(() => {
+        setError("Unable to load operational data.");
+      })
+      .finally(() => setLoading(false));
   }
+
+  useEffect(load, []);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Live Operations</p>
+          <h1 className="font-display text-2xl font-semibold text-white">Operations Map</h1>
+        </div>
+        <div className="flex items-center gap-4 text-xs">
+          <LegendToggle
+            color={VEHICLE_COLOR}
+            label={`Vehicles (${vehicles.length})`}
+            active={layers.vehicles}
+            onClick={() => setLayers((l) => ({ ...l, vehicles: !l.vehicles }))}
+          />
+          <LegendToggle
+            color="#E8A93B"
+            label={`Bins (${bins.length})`}
+            active={layers.bins}
+            onClick={() => setLayers((l) => ({ ...l, bins: !l.bins }))}
+          />
+          <LegendToggle
+            color={INCIDENT_COLOR}
+            label={`Open Incidents (${incidents.length})`}
+            active={layers.incidents}
+            onClick={() => setLayers((l) => ({ ...l, incidents: !l.incidents }))}
+          />
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="bg-graphite-800 border border-graphite-700 rounded-sm flex items-center justify-center" style={{ height: 560 }}>
+          <p className="text-gray-400 text-sm">Loading operational data...</p>
+        </div>
+      ) : error ? (
+        <div className="bg-graphite-800 border border-graphite-700 rounded-sm flex flex-col items-center justify-center gap-3" style={{ height: 560 }}>
+          <p className="text-status-critical text-sm">{error}</p>
+          <button
+            onClick={load}
+            className="text-sm bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
+          >
+            Retry
+          </button>
+        </div>
+      ) : vehicles.length === 0 && bins.length === 0 && incidents.length === 0 ? (
+        <div className="bg-graphite-800 border border-graphite-700 rounded-sm flex items-center justify-center" style={{ height: 560 }}>
+          <p className="text-gray-500 text-sm">No operational data available.</p>
+        </div>
+      ) : (
+      <div className="bg-graphite-800 border border-graphite-700 rounded-sm overflow-hidden" style={{ height: 560 }}>
+        <MapContainer center={TEMA_CENTER} zoom={13} style={{ height: "100%", width: "100%", background: "#15181B" }}>
+          <TileLayer
+            attribution='&copy; OpenStreetMap contributors'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          />
+
+          {layers.vehicles &&
+            vehicles
+              .filter((v) => v.current_lat && v.current_lng)
+              .map((v) => (
+                <CircleMarker
+                  key={`v-${v.id}`}
+                  center={[parseFloat(v.current_lat!), parseFloat(v.current_lng!)]}
+                  radius={7}
+                  pathOptions={{ color: VEHICLE_COLOR, fillColor: VEHICLE_COLOR, fillOpacity: 0.85, weight: 2 }}
+                >
+                  <Popup>
+                    <div className="text-xs">
+                      <strong>{v.registration_number}</strong>
+                      <br />
+                      Status: {v.status.replace("_", " ")}
+                      <br />
+                      Speed: {v.speed_kmh} km/h
+                      <br />
+                      Driver: {v.driver_name || "Unassigned"}
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              ))}
+
+          {layers.bins &&
+            bins
+              .filter((b) => b.lat && b.lng)
+              .map((b) => (
+                <CircleMarker
+                  key={`b-${b.id}`}
+                  center={[parseFloat(b.lat!), parseFloat(b.lng!)]}
+                  radius={5}
+                  pathOptions={{
+                    color: BIN_COLORS[b.status] || "#6B7076",
+                    fillColor: BIN_COLORS[b.status] || "#6B7076",
+                    fillOpacity: 0.8,
+                    weight: 1,
+                  }}
+                >
+                  <Popup>
+                    <div className="text-xs">
+                      <strong>{b.bin_code}</strong>
+                      <br />
+                      {b.zone_name}
+                      <br />
+                      Fill: {b.fill_level_pct}% ({b.status.replace("_", " ")})
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              ))}
+
+          {layers.incidents &&
+            incidents
+              .filter((i) => i.lat && i.lng)
+              .map((i) => (
+                <CircleMarker
+                  key={`i-${i.id}`}
+                  center={[parseFloat(i.lat!), parseFloat(i.lng!)]}
+                  radius={9}
+                  pathOptions={{ color: INCIDENT_COLOR, fillColor: INCIDENT_COLOR, fillOpacity: 0.3, weight: 2 }}
+                >
+                  <Popup>
+                    <div className="text-xs">
+                      <strong>{i.ticket_number}</strong>
+                      <br />
+                      {i.location}
+                      <br />
+                      Severity: {i.severity}
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              ))}
+        </MapContainer>
+      </div>
+      )}
+      <p className="text-[11px] text-gray-500">
+        Demo data — vehicle positions and sensor readings are simulated for this phase.
+      </p>
+    </div>
+  );
 }
 
-export interface PendingStop {
-  stop_id: number;
-  status: "COMPLETED";
-  arrived_at_client: string; // ISO timestamp, stamped locally at time of check-in
-  route_id: number;
-  scanned_code?: string;
-}
-
-export function getQueue(): PendingStop[] {
-  try {
-    const raw = localStorage.getItem(queueKey());
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveQueue(queue: PendingStop[]) {
-  localStorage.setItem(queueKey(), JSON.stringify(queue));
-}
-
-export function queueStopCompletion(stop: PendingStop) {
-  const queue = getQueue();
-  // avoid duplicate queue entries for the same stop
-  const filtered = queue.filter((q) => q.stop_id !== stop.stop_id);
-  filtered.push(stop);
-  saveQueue(filtered);
-}
-
-export function isStopPending(stopId: number): boolean {
-  return getQueue().some((q) => q.stop_id === stopId);
-}
-
-export async function trySync(): Promise<{ synced: number; failed: number }> {
-  const queue = getQueue();
-  if (queue.length === 0) return { synced: 0, failed: 0 };
-
-  try {
-    const res = await api.post("/routes/sync", { pending: queue });
-    const results: { stop_id: number; ok: boolean }[] = res.data.results;
-    const succeededIds = new Set(results.filter((r) => r.ok).map((r) => r.stop_id));
-    const remaining = queue.filter((q) => !succeededIds.has(q.stop_id));
-    saveQueue(remaining);
-    return { synced: succeededIds.size, failed: remaining.length };
-  } catch {
-    // network still unavailable, or server error — leave queue intact, try again later
-    return { synced: 0, failed: queue.length };
-  }
+function LegendToggle({ color, label, active, onClick }: { color: string; label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1.5 px-2 py-1 rounded-sm border transition-colors ${
+        active ? "border-graphite-600 text-gray-200" : "border-graphite-700 text-gray-600"
+      }`}
+    >
+      <span className="w-2.5 h-2.5 rounded-full" style={{ background: active ? color : "#4A535C" }} />
+      {label}
+    </button>
+  );
 }

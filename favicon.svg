@@ -1,207 +1,155 @@
 import { useEffect, useState } from "react";
+import { useNavigate, Link } from "react-router-dom";
 import { api } from "../api";
-import StatusBadge from "../components/StatusBadge";
+import { useAuth } from "../AuthContext";
 
-interface Complaint {
+interface Zone {
   id: number;
-  tracking_number: string;
-  category: string;
-  location: string;
-  description: string;
-  status: string;
-  response: string | null;
-  created_at: string;
+  name: string;
 }
 
-interface RecentCollection {
-  id: number;
-  collection_code: string;
-  location: string;
-  actual_pickup_time: string | null;
-  waste_type: string;
-  confirmation_id: number | null;
-  rating: number | null;
-  comment: string | null;
-}
+export default function Signup() {
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const [fullName, setFullName] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("");
+  const [zoneId, setZoneId] = useState("");
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-const CATEGORIES = [
-  { value: "missed_collection", label: "Missed Collection" },
-  { value: "overflowing_bin", label: "Overflowing Bin" },
-  { value: "illegal_dumping", label: "Illegal Dumping" },
-  { value: "damaged_bin", label: "Damaged Bin" },
-  { value: "other", label: "Other" },
-];
+  useEffect(() => {
+    // Zones are public-ish reference data needed for signup, but the zones
+    // endpoint requires auth — fall back gracefully if it's not reachable
+    // pre-login (zone selection just becomes optional in that case).
+    api.get("/zones").then((res) => setZones(res.data.zones)).catch(() => {});
+  }, []);
 
-export default function ResidentPortal() {
-  const [complaints, setComplaints] = useState<Complaint[]>([]);
-  const [recent, setRecent] = useState<RecentCollection[]>([]);
-  const [showForm, setShowForm] = useState(false);
-  const [loading, setLoading] = useState(true);
-
-  function load() {
-    setLoading(true);
-    Promise.all([
-      api.get("/complaints"),
-      api.get("/confirmations/recent-in-my-zone"),
-    ])
-      .then(([c, r]) => {
-        setComplaints(c.data.complaints);
-        setRecent(r.data.collections);
-      })
-      .finally(() => setLoading(false));
-  }
-  useEffect(load, []);
-
-  async function submitConfirmation(collectionId: number, rating: number) {
-    await api.post("/confirmations", { collection_id: collectionId, rating });
-    load();
-  }
-
-  return (
-    <div className="space-y-6 max-w-2xl">
-      <div>
-        <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Resident Portal</p>
-        <h1 className="font-display text-2xl font-semibold text-white">Waste Collection</h1>
-      </div>
-
-      <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5">
-        <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">Next Collection</p>
-        <p className="font-display text-2xl text-white">Monday</p>
-        <p className="text-sm text-gray-400">7:00 AM – 9:00 AM</p>
-      </div>
-
-      {recent.length > 0 && (
-        <div>
-          <h2 className="font-display text-lg text-white mb-3">Confirm Recent Collections</h2>
-          <div className="space-y-2">
-            {recent.map((c) => (
-              <div key={c.id} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-mono text-xs text-gold-500">{c.collection_code}</span>
-                  <span className="text-[11px] text-gray-500">
-                    {c.actual_pickup_time ? new Date(c.actual_pickup_time).toLocaleDateString() : "—"}
-                  </span>
-                </div>
-                <p className="text-sm text-gray-200 mb-2">{c.location} · {c.waste_type?.replace("_", " ")}</p>
-                {c.confirmation_id ? (
-                  <p className="text-xs text-status-success">
-                    ✓ You confirmed this {c.rating ? `— rated ${c.rating}/5` : ""}
-                  </p>
-                ) : (
-                  <div className="flex items-center gap-1">
-                    <span className="text-[11px] text-gray-400 mr-1">Confirm & rate:</span>
-                    {[1, 2, 3, 4, 5].map((n) => (
-                      <button
-                        key={n}
-                        onClick={() => submitConfirmation(c.id, n)}
-                        className="text-lg text-gray-600 hover:text-gold-500 transition-colors"
-                        title={`${n} star${n > 1 ? "s" : ""}`}
-                      >
-                        ★
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="flex items-center justify-between">
-        <h2 className="font-display text-lg text-white">My Reports</h2>
-        <button
-          onClick={() => setShowForm((s) => !s)}
-          className="text-sm bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold px-3 py-1.5 rounded-sm"
-        >
-          {showForm ? "Cancel" : "+ Report an Issue"}
-        </button>
-      </div>
-
-      {showForm && <ReportForm onSubmitted={() => { setShowForm(false); load(); }} />}
-
-      <div className="space-y-2">
-        {loading ? (
-          <p className="text-gray-500 text-sm">Loading...</p>
-        ) : complaints.length === 0 ? (
-          <p className="text-gray-500 text-sm">No reports submitted yet.</p>
-        ) : (
-          complaints.map((c) => (
-            <div key={c.id} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-mono text-xs text-gold-500">{c.tracking_number}</span>
-                <StatusBadge status={c.status === "SUBMITTED" ? "PENDING" : c.status === "IN_REVIEW" ? "IN_PROGRESS" : c.status} />
-              </div>
-              <p className="text-sm text-gray-200">{c.description}</p>
-              {c.response && (
-                <p className="text-xs text-status-success mt-2 border-l-2 border-status-success/40 pl-2">{c.response}</p>
-              )}
-              <p className="text-[11px] text-gray-500 mt-2">{new Date(c.created_at).toLocaleDateString()}</p>
-            </div>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ReportForm({ onSubmitted }: { onSubmitted: () => void }) {
-  const [category, setCategory] = useState(CATEGORIES[0].value);
-  const [location, setLocation] = useState("");
-  const [description, setDescription] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  async function submit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!description.trim()) return;
-    setSubmitting(true);
+    setError(null);
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
+    setLoading(true);
     try {
-      await api.post("/complaints", { category, location, description });
-      onSubmitted();
+      await api.post("/auth/register", {
+        full_name: fullName.trim(),
+        username: username.trim(),
+        password,
+        email: email.trim() || undefined,
+        zone_id: zoneId || undefined,
+      });
+      await login(username.trim(), password);
+      navigate("/");
+    } catch (err: any) {
+      setError(err.friendlyMessage || err.response?.data?.error || "Couldn't create your account. Please try again.");
     } finally {
-      setSubmitting(false);
+      setLoading(false);
     }
   }
 
   return (
-    <form onSubmit={submit} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4 space-y-3">
-      <label className="block">
-        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">What's the issue?</span>
-        <select
-          value={category}
-          onChange={(e) => setCategory(e.target.value)}
-          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-        >
-          {CATEGORIES.map((c) => (
-            <option key={c.value} value={c.value}>{c.label}</option>
-          ))}
-        </select>
-      </label>
-      <label className="block">
-        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Where?</span>
-        <input
-          value={location}
-          onChange={(e) => setLocation(e.target.value)}
-          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-          placeholder="e.g. Estate Housing A, Block 4"
-        />
-      </label>
-      <label className="block">
-        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Details</span>
-        <textarea
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          rows={3}
-          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-        />
-      </label>
-      <button
-        type="submit"
-        disabled={submitting}
-        className="text-sm bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
-      >
-        {submitting ? "Submitting..." : "Submit Report"}
-      </button>
-    </form>
+    <div className="min-h-screen bg-graphite-900 flex items-center justify-center px-4">
+      <div className="w-full max-w-md">
+        <div className="mb-8 text-center">
+          <div className="inline-flex items-center gap-2 mb-3">
+            <div className="w-2 h-8 bg-gold-500" />
+            <span className="font-display text-3xl font-bold tracking-wide text-white">VALCO</span>
+          </div>
+          <p className="font-display text-sm tracking-[0.25em] text-gold-500 uppercase">Resident Sign Up</p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="bg-graphite-800 border border-graphite-700 rounded-sm p-8 shadow-2xl">
+          <h1 className="font-display text-xl font-semibold text-white mb-1">Create your account</h1>
+          <p className="text-sm text-gray-400 mb-6">
+            For residents to report collection issues and track waste pickup in your area.
+          </p>
+
+          {error && (
+            <div className="mb-4 px-3 py-2 bg-status-criticalBg border border-status-critical/40 text-status-critical text-sm rounded-sm">
+              {error}
+            </div>
+          )}
+
+          <label className="block mb-4">
+            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Full name</span>
+            <input
+              required
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none"
+              placeholder="Kofi Adjei"
+            />
+          </label>
+
+          <label className="block mb-4">
+            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Username</span>
+            <input
+              required
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none"
+              placeholder="kofi.adjei"
+            />
+          </label>
+
+          <label className="block mb-4">
+            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Email (optional)</span>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none"
+              placeholder="kofi@example.com"
+            />
+          </label>
+
+          {zones.length > 0 && (
+            <label className="block mb-4">
+              <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Your area</span>
+              <select
+                value={zoneId}
+                onChange={(e) => setZoneId(e.target.value)}
+                className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white focus:border-gold-500 outline-none"
+              >
+                <option value="">Select your zone</option>
+                {zones.map((z) => (
+                  <option key={z.id} value={z.id}>{z.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          <label className="block mb-6">
+            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Password</span>
+            <input
+              required
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none"
+              placeholder="At least 6 characters"
+            />
+          </label>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold py-2.5 rounded-sm"
+          >
+            {loading ? "Creating account..." : "Create account"}
+          </button>
+
+          <p className="mt-6 text-xs text-gray-500 text-center">
+            Already have an account?{" "}
+            <Link to="/login" className="text-gold-500 hover:underline">Log in</Link>
+          </p>
+        </form>
+      </div>
+    </div>
   );
 }

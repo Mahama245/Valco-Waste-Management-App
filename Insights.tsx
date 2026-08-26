@@ -1,101 +1,98 @@
-import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
-import { useAuth } from "../AuthContext";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { QRCodeSVG } from "qrcode.react";
+import { api } from "../api";
 
-export default function Login() {
-  const { login } = useAuth();
-  const navigate = useNavigate();
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+interface Bin {
+  id: number;
+  bin_code: string;
+  zone_name: string;
+  location: string;
+}
+interface Zone {
+  id: number;
+  name: string;
+}
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
-    try {
-      await login(username.trim(), password);
-      navigate("/");
-    } catch (err: any) {
-      setError(err.response?.data?.error || "Login failed. Check your credentials.");
-    } finally {
+export default function PrintQrCodes() {
+  const [params] = useSearchParams();
+  const singleBinId = params.get("bin");
+
+  const [bins, setBins] = useState<Bin[]>([]);
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [zoneFilter, setZoneFilter] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    Promise.all([api.get("/bins"), api.get("/zones")]).then(([b, z]) => {
+      setBins(b.data.bins);
+      setZones(z.data.zones);
       setLoading(false);
-    }
-  }
+    });
+  }, []);
+
+  const visible = bins.filter((b) => {
+    if (singleBinId) return b.id === Number(singleBinId);
+    if (zoneFilter) return String(b.id) && zones.find((z) => z.id === Number(zoneFilter))?.name === b.zone_name;
+    return true;
+  });
 
   return (
-    <div className="min-h-screen bg-graphite-900 flex items-center justify-center px-4 relative overflow-hidden">
-      {/* subtle industrial backdrop grid */}
-      <div
-        className="absolute inset-0 opacity-[0.04]"
-        style={{
-          backgroundImage:
-            "linear-gradient(#C9A24B 1px, transparent 1px), linear-gradient(90deg, #C9A24B 1px, transparent 1px)",
-          backgroundSize: "48px 48px",
-        }}
-      />
-
-      <div className="relative w-full max-w-md">
-        <div className="mb-8 text-center">
-          <div className="inline-flex items-center gap-2 mb-3">
-            <div className="w-2 h-8 bg-gold-500" />
-            <span className="font-display text-3xl font-bold tracking-wide text-white">VALCO</span>
-          </div>
-          <p className="font-display text-sm tracking-[0.25em] text-gold-500 uppercase">
-            Waste Management &amp; Environmental Operations
+    <div className="space-y-5">
+      <div className="print:hidden flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Infrastructure</p>
+          <h1 className="font-display text-2xl font-semibold text-white">Print QR Codes</h1>
+          <p className="text-sm text-gray-400 mt-1">
+            Each QR code encodes that bin's unique code. Print, cut out, and attach to the physical bin — collectors
+            scan it to confirm pickup, and it's checked against whichever bin was assigned to that stop.
           </p>
         </div>
-
-        <form
-          onSubmit={handleSubmit}
-          className="bg-graphite-800 border border-graphite-700 rounded-sm p-8 shadow-2xl"
-        >
-          <h1 className="font-display text-xl font-semibold text-white mb-1">Sign in</h1>
-          <p className="text-sm text-gray-400 mb-6">Enter your credentials to access the operations platform.</p>
-
-          {error && (
-            <div className="mb-4 px-3 py-2 bg-status-criticalBg border border-status-critical/40 text-status-critical text-sm rounded-sm">
-              {error}
-            </div>
+        <div className="flex items-center gap-2">
+          {!singleBinId && (
+            <select
+              value={zoneFilter}
+              onChange={(e) => setZoneFilter(e.target.value)}
+              className="bg-graphite-800 border border-graphite-600 rounded-sm px-3 py-1.5 text-sm text-white"
+            >
+              <option value="">All zones</option>
+              {zones.map((z) => (
+                <option key={z.id} value={z.id}>{z.name}</option>
+              ))}
+            </select>
           )}
-
-          <label className="block mb-4">
-            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Username</span>
-            <input
-              autoFocus
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none transition-colors"
-              placeholder="e.g. supervisor"
-            />
-          </label>
-
-          <label className="block mb-6">
-            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Password</span>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none transition-colors"
-              placeholder="••••••••"
-            />
-          </label>
-
           <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold py-2.5 rounded-sm transition-colors"
+            onClick={() => window.print()}
+            className="text-sm bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
           >
-            {loading ? "Signing in..." : "Sign in"}
+            🖨 Print {visible.length} QR Code{visible.length !== 1 ? "s" : ""}
           </button>
-
-          <p className="mt-3 text-xs text-gray-500 text-center">
-            Resident?{" "}
-            <Link to="/signup" className="text-gold-500 hover:underline">Create an account</Link>
-          </p>
-        </form>
+        </div>
       </div>
+
+      {loading ? (
+        <p className="text-gray-500 text-sm">Loading...</p>
+      ) : visible.length === 0 ? (
+        <p className="text-gray-500 text-sm">No collection points match this filter.</p>
+      ) : (
+        <div className="bg-white rounded-sm p-6 print:p-0 print:rounded-none">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-6 print:grid-cols-2 print:gap-4">
+            {visible.map((b) => (
+              <div
+                key={b.id}
+                className="border border-gray-300 rounded-sm p-4 text-center break-inside-avoid print:border-black"
+              >
+                <p className="font-display text-sm font-bold text-graphite-950">{b.bin_code}</p>
+                <p className="text-[11px] text-graphite-600 mb-2">{b.zone_name}</p>
+                <div className="flex justify-center mb-2">
+                  <QRCodeSVG value={b.bin_code} size={140} />
+                </div>
+                <p className="text-[10px] text-graphite-500 leading-tight">{b.location}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
