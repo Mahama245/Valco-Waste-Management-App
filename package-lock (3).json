@@ -1,150 +1,155 @@
-import { Router } from "express";
-import bcrypt from "bcryptjs";
-import rateLimit from "express-rate-limit";
-import { pool } from "../db/pool";
-import { signToken, authenticate, AuthedRequest } from "../middleware/auth";
-import { logAudit } from "../utils/audit";
+import { useEffect, useState } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { api } from "../api";
+import { useAuth } from "../AuthContext";
 
-const router = Router();
+interface Zone {
+  id: number;
+  name: string;
+}
 
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { error: "Too many login attempts. Please try again in 15 minutes." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+export default function Signup() {
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const [fullName, setFullName] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("");
+  const [zoneId, setZoneId] = useState("");
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-const registerLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 5,
-  message: { error: "Too many accounts created from this network. Please try again in an hour." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+  useEffect(() => {
+    // Zones are public-ish reference data needed for signup, but the zones
+    // endpoint requires auth — fall back gracefully if it's not reachable
+    // pre-login (zone selection just becomes optional in that case).
+    api.get("/zones").then((res) => setZones(res.data.zones)).catch(() => {});
+  }, []);
 
-router.post("/login", loginLimiter, async (req, res) => {
-  try {
-    const { username, password } = req.body || {};
-    if (!username || !password) {
-      return res.status(400).json({ error: "Username and password are required." });
-    }
-    const clean = String(username).trim().toLowerCase();
-
-    const result = await pool.query(
-      "SELECT id, full_name, username, password_hash, role, is_active FROM users WHERE username = $1",
-      [clean]
-    );
-    const user = result.rows[0];
-    if (!user || !user.is_active || !bcrypt.compareSync(password, user.password_hash)) {
-      return res.status(401).json({ error: "Invalid username or password." });
-    }
-
-    await pool.query("UPDATE users SET last_login = now() WHERE id = $1", [user.id]);
-
-    const token = signToken({ id: user.id, username: user.username, role: user.role, fullName: user.full_name });
-
-    await logAudit({
-      userId: user.id,
-      action: "LOGIN",
-      recordType: "user",
-      recordId: user.id,
-      description: `${user.full_name} (${user.role}) logged in.`,
-      ip: req.ip,
-    });
-
-    res.json({
-      token,
-      user: { id: user.id, username: user.username, fullName: user.full_name, role: user.role },
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error during login." });
-  }
-});
-
-router.get("/me", authenticate, async (req: AuthedRequest, res) => {
-  res.json({ user: req.user });
-});
-
-// Any logged-in user — including admins — changing their OWN password.
-// Requires the current password, unlike an admin resetting someone else's
-// (/api/users/:id/reset-password), which is a different action with
-// different trust assumptions.
-router.patch("/change-password", authenticate, async (req: AuthedRequest, res) => {
-  const { current_password, new_password } = req.body || {};
-  if (!current_password || !new_password) {
-    return res.status(400).json({ error: "current_password and new_password are required." });
-  }
-  if (new_password.length < 6) {
-    return res.status(400).json({ error: "new_password must be at least 6 characters." });
-  }
-
-  const user = await pool.query("SELECT password_hash FROM users WHERE id = $1", [req.user!.id]);
-  if (!user.rows[0] || !bcrypt.compareSync(current_password, user.rows[0].password_hash)) {
-    return res.status(401).json({ error: "Current password is incorrect." });
-  }
-
-  const hash = bcrypt.hashSync(new_password, 10);
-  await pool.query("UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2", [hash, req.user!.id]);
-
-  await logAudit({
-    userId: req.user!.id,
-    action: "UPDATE",
-    recordType: "user",
-    recordId: req.user!.id,
-    description: `${req.user!.fullName} changed their own password.`,
-    ip: req.ip,
-  });
-
-  res.json({ ok: true });
-});
-
-// Public self-registration — residents only. Staff accounts (collectors,
-// supervisors, admins, etc.) are still created by an administrator via
-// /api/users, never through this open endpoint.
-router.post("/register", registerLimiter, async (req, res) => {
-  try {
-    const { full_name, username, password, email, zone_id } = req.body || {};
-    if (!full_name || !username || !password) {
-      return res.status(400).json({ error: "full_name, username, and password are required." });
-    }
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
     if (password.length < 6) {
-      return res.status(400).json({ error: "Password must be at least 6 characters." });
+      setError("Password must be at least 6 characters.");
+      return;
     }
-    const clean = String(username).trim().toLowerCase();
-
-    const existing = await pool.query("SELECT id FROM users WHERE username = $1", [clean]);
-    if (existing.rows[0]) return res.status(409).json({ error: "That username is already taken." });
-
-    const hash = bcrypt.hashSync(password, 10);
-    const result = await pool.query(
-      `INSERT INTO users (full_name, username, email, password_hash, role, department, zone_id)
-       VALUES ($1, $2, $3, $4, 'RESIDENT', 'Resident', $5)
-       RETURNING id, full_name, username, role`,
-      [full_name, clean, email || null, hash, zone_id || null]
-    );
-
-    const user = result.rows[0];
-    const token = signToken({ id: user.id, username: user.username, role: user.role, fullName: user.full_name });
-
-    await logAudit({
-      userId: user.id,
-      action: "CREATE",
-      recordType: "user",
-      recordId: user.id,
-      description: `${full_name} self-registered as a Resident.`,
-      ip: req.ip,
-    });
-
-    res.status(201).json({
-      token,
-      user: { id: user.id, username: user.username, fullName: user.full_name, role: user.role },
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error during registration." });
+    setLoading(true);
+    try {
+      await api.post("/auth/register", {
+        full_name: fullName.trim(),
+        username: username.trim(),
+        password,
+        email: email.trim() || undefined,
+        zone_id: zoneId || undefined,
+      });
+      await login(username.trim(), password);
+      navigate("/");
+    } catch (err: any) {
+      setError(err.friendlyMessage || err.response?.data?.error || "Couldn't create your account. Please try again.");
+    } finally {
+      setLoading(false);
+    }
   }
-});
 
-export default router;
+  return (
+    <div className="min-h-screen bg-graphite-900 flex items-center justify-center px-4">
+      <div className="w-full max-w-md">
+        <div className="mb-8 text-center">
+          <div className="inline-flex items-center gap-2 mb-3">
+            <div className="w-2 h-8 bg-gold-500" />
+            <span className="font-display text-3xl font-bold tracking-wide text-white">VALCO</span>
+          </div>
+          <p className="font-display text-sm tracking-[0.25em] text-gold-500 uppercase">Resident Sign Up</p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="bg-graphite-800 border border-graphite-700 rounded-sm p-8 shadow-2xl">
+          <h1 className="font-display text-xl font-semibold text-white mb-1">Create your account</h1>
+          <p className="text-sm text-gray-400 mb-6">
+            For residents to report collection issues and track waste pickup in your area.
+          </p>
+
+          {error && (
+            <div className="mb-4 px-3 py-2 bg-status-criticalBg border border-status-critical/40 text-status-critical text-sm rounded-sm">
+              {error}
+            </div>
+          )}
+
+          <label className="block mb-4">
+            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Full name</span>
+            <input
+              required
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none"
+              placeholder="Kofi Adjei"
+            />
+          </label>
+
+          <label className="block mb-4">
+            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Username</span>
+            <input
+              required
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none"
+              placeholder="kofi.adjei"
+            />
+          </label>
+
+          <label className="block mb-4">
+            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Email (optional)</span>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none"
+              placeholder="kofi@example.com"
+            />
+          </label>
+
+          {zones.length > 0 && (
+            <label className="block mb-4">
+              <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Your area</span>
+              <select
+                value={zoneId}
+                onChange={(e) => setZoneId(e.target.value)}
+                className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white focus:border-gold-500 outline-none"
+              >
+                <option value="">Select your zone</option>
+                {zones.map((z) => (
+                  <option key={z.id} value={z.id}>{z.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          <label className="block mb-6">
+            <span className="block text-xs uppercase tracking-wider text-gray-400 mb-1.5">Password</span>
+            <input
+              required
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-3 py-2.5 text-white placeholder-gray-500 focus:border-gold-500 outline-none"
+              placeholder="At least 6 characters"
+            />
+          </label>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold py-2.5 rounded-sm"
+          >
+            {loading ? "Creating account..." : "Create account"}
+          </button>
+
+          <p className="mt-6 text-xs text-gray-500 text-center">
+            Already have an account?{" "}
+            <Link to="/login" className="text-gold-500 hover:underline">Log in</Link>
+          </p>
+        </form>
+      </div>
+    </div>
+  );
+}

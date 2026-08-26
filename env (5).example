@@ -1,205 +1,385 @@
-import { Router } from "express";
-import { pool } from "../db/pool";
-import { authenticate, authorize, AuthedRequest } from "../middleware/auth";
-import { logAudit } from "../utils/audit";
-import { nextBinCode } from "../utils/identifiers";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { api } from "../api";
+import { useAuth } from "../AuthContext";
 
-const router = Router();
-const MANAGE_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"];
+interface Bin {
+  id: number;
+  bin_code: string;
+  zone_id: number;
+  zone_name: string;
+  location: string;
+  waste_type: string;
+  capacity_liters: string;
+  fill_level_pct: string;
+  status: string;
+  last_collected_at: string | null;
+  next_scheduled_at: string | null;
+}
+interface Zone {
+  id: number;
+  name: string;
+}
 
-router.get("/", authenticate, async (req, res) => {
-  const { zone_id, status } = req.query;
-  const clauses: string[] = [];
-  const values: any[] = [];
-  let i = 1;
-  if (zone_id) { clauses.push(`b.zone_id = $${i++}`); values.push(zone_id); }
-  if (status) { clauses.push(`b.status = $${i++}`); values.push(status); }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+const STATUS_COLORS: Record<string, string> = {
+  NORMAL: "bg-status-success",
+  NEAR_CAPACITY: "bg-status-warning",
+  CRITICAL: "bg-status-critical",
+  OUT_OF_SERVICE: "bg-gray-500",
+};
+const WASTE_TYPES = ["GENERAL", "PLASTIC", "PAPER", "METAL", "GLASS", "ORGANIC", "HAZARDOUS", "E_WASTE", "OTHER"];
+const MANAGE_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "COLLECTOR"];
+const EDIT_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"];
 
-  const result = await pool.query(
-    `SELECT b.id, b.bin_code, b.zone_id, z.name AS zone_name, b.location, b.lat, b.lng, b.waste_type,
-            b.capacity_liters, b.fill_level_pct, b.status, b.condition, b.last_collected_at, b.next_scheduled_at
-     FROM bins b JOIN zones z ON z.id = b.zone_id
-     ${where}
-     ORDER BY b.fill_level_pct DESC`,
-    values
-  );
-  res.json({ bins: result.rows });
-});
+export default function Bins() {
+  const { user } = useAuth();
+  const [bins, setBins] = useState<Bin[]>([]);
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [showZoneForm, setShowZoneForm] = useState(false);
+  const [editingBin, setEditingBin] = useState<Bin | null>(null);
+  const canManage = user && MANAGE_ROLES.includes(user.role);
+  const canEdit = user && EDIT_ROLES.includes(user.role);
 
-router.get("/alerts", authenticate, async (_req, res) => {
-  const result = await pool.query(
-    `SELECT b.id, b.bin_code, z.name AS zone_name, b.fill_level_pct, b.status
-     FROM bins b JOIN zones z ON z.id = b.zone_id
-     WHERE b.fill_level_pct >= 70
-     ORDER BY b.fill_level_pct DESC`
-  );
-  res.json({ alerts: result.rows });
-});
-
-// Simulates an IoT sensor push updating fill level (in a real deployment this
-// would be called by the sensor gateway, not a human via the UI)
-router.patch("/:id/fill-level", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
-  const { fill_level_pct } = req.body || {};
-  if (typeof fill_level_pct !== "number" || fill_level_pct < 0 || fill_level_pct > 100) {
-    return res.status(400).json({ error: "fill_level_pct must be a number between 0 and 100." });
-  }
-  const status = fill_level_pct >= 95 ? "CRITICAL" : fill_level_pct >= 70 ? "NEAR_CAPACITY" : "NORMAL";
-
-  const result = await pool.query(
-    `UPDATE bins SET fill_level_pct = $1, status = $2, updated_at = now() WHERE id = $3 RETURNING *`,
-    [fill_level_pct, status, req.params.id]
-  );
-  if (!result.rows[0]) return res.status(404).json({ error: "Bin not found." });
-
-  if (status !== "NORMAL") {
-    await logAudit({
-      userId: req.user!.id,
-      action: "UPDATE",
-      recordType: "bin",
-      recordId: Number(req.params.id),
-      description: `Bin ${result.rows[0].bin_code} reached ${fill_level_pct}% fill (${status}).`,
-      ip: req.ip,
-    });
+  function load() {
+    setLoading(true);
+    api
+      .get("/bins", { params: statusFilter ? { status: statusFilter } : {} })
+      .then((res) => setBins(res.data.bins))
+      .finally(() => setLoading(false));
   }
 
-  res.json({ bin: result.rows[0] });
-});
+  useEffect(load, [statusFilter]);
+  function loadZones() {
+    api.get("/zones").then((res) => setZones(res.data.zones));
+  }
+  useEffect(loadZones, []);
 
-router.patch("/:id/collected", authenticate, authorize(...MANAGE_ROLES, "COLLECTOR"), async (req: AuthedRequest, res) => {
-  // A collector may only mark a bin collected if it's actually assigned to
-  // one of their own route stops for today. Managers/admins can mark any
-  // bin (they're not doing the physical collection, they're correcting
-  // records), but a collector marking arbitrary bins done — bins they were
-  // never near — is exactly the kind of false-completion this must prevent.
-  if (req.user!.role === "COLLECTOR") {
-    const assigned = await pool.query(
-      `SELECT rs.id FROM route_stops rs
-       JOIN routes r ON r.id = rs.route_id
-       WHERE rs.bin_id = $1 AND r.collector_id = $2 AND r.scheduled_date = CURRENT_DATE`,
-      [req.params.id, req.user!.id]
-    );
-    if (!assigned.rows[0]) {
-      return res.status(403).json({ error: "This bin isn't assigned to one of your route stops today." });
+  async function markCollected(id: number) {
+    setBusyId(id);
+    try {
+      await api.patch(`/bins/${id}/collected`);
+      load();
+    } finally {
+      setBusyId(null);
     }
   }
 
-  const result = await pool.query(
-    `UPDATE bins SET fill_level_pct = 0, status = 'NORMAL', last_collected_at = now(),
-       next_scheduled_at = now() + interval '2 days', updated_at = now()
-     WHERE id = $1 RETURNING *`,
-    [req.params.id]
-  );
-  if (!result.rows[0]) return res.status(404).json({ error: "Bin not found." });
-
-  await logAudit({
-    userId: req.user!.id,
-    action: "UPDATE",
-    recordType: "bin",
-    recordId: Number(req.params.id),
-    description: `${req.user!.fullName} (${req.user!.role}) marked bin ${result.rows[0].bin_code} as collected.`,
-    ip: req.ip,
-  });
-
-  res.json({ bin: result.rows[0] });
-});
-
-router.get("/by-code/:code", authenticate, async (req, res) => {
-  const result = await pool.query(
-    `SELECT b.id, b.bin_code, b.location, z.name AS zone_name, b.waste_type, b.fill_level_pct, b.status
-     FROM bins b JOIN zones z ON z.id = b.zone_id WHERE b.bin_code = $1`,
-    [req.params.code]
-  );
-  if (!result.rows[0]) return res.status(404).json({ error: "No bin with that code." });
-  res.json({ bin: result.rows[0] });
-});
-
-// Create a new bin (a new physical collection point / location).
-router.post("/", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
-  const { zone_id, location, waste_type, capacity_liters, lat, lng } = req.body || {};
-  if (!zone_id || !location) {
-    return res.status(400).json({ error: "zone_id and location are required." });
-  }
-
-  const binCode = await nextBinCode();
-
-  const result = await pool.query(
-    `INSERT INTO bins (bin_code, zone_id, location, lat, lng, waste_type, capacity_liters)
-     VALUES ($1,$2,$3,$4,$5,COALESCE($6,'GENERAL')::waste_type,COALESCE($7,1100))
-     RETURNING *`,
-    [binCode, zone_id, location, lat || null, lng || null, waste_type, capacity_liters]
-  );
-
-  await logAudit({
-    userId: req.user!.id,
-    action: "CREATE",
-    recordType: "bin",
-    recordId: result.rows[0].id,
-    description: `${req.user!.fullName} (${req.user!.role}) added a new collection point: ${binCode} at ${location}.`,
-    ip: req.ip,
-  });
-
-  res.status(201).json({ bin: result.rows[0] });
-});
-
-// Edit an existing bin's details (location, zone, waste type, capacity, coordinates).
-router.patch("/:id", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
-  const { zone_id, location, waste_type, capacity_liters, lat, lng, condition } = req.body || {};
-
-  const before = await pool.query("SELECT * FROM bins WHERE id = $1", [req.params.id]);
-  if (!before.rows[0]) return res.status(404).json({ error: "Bin not found." });
-
-  const result = await pool.query(
-    `UPDATE bins SET
-       zone_id = COALESCE($1, zone_id),
-       location = COALESCE($2, location),
-       waste_type = COALESCE($3, waste_type),
-       capacity_liters = COALESCE($4, capacity_liters),
-       lat = COALESCE($5, lat),
-       lng = COALESCE($6, lng),
-       condition = COALESCE($7, condition),
-       updated_at = now()
-     WHERE id = $8 RETURNING *`,
-    [zone_id, location, waste_type, capacity_liters, lat, lng, condition, req.params.id]
-  );
-
-  await logAudit({
-    userId: req.user!.id,
-    action: "UPDATE",
-    recordType: "bin",
-    recordId: Number(req.params.id),
-    description: `${req.user!.fullName} (${req.user!.role}) updated collection point ${before.rows[0].bin_code}.`,
-    previousValue: before.rows[0],
-    newValue: result.rows[0],
-    ip: req.ip,
-  });
-
-  res.json({ bin: result.rows[0] });
-});
-
-// Remove a bin that no longer exists physically (e.g. decommissioned location).
-router.delete("/:id", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
-  try {
-    const result = await pool.query("DELETE FROM bins WHERE id = $1 RETURNING bin_code, location", [req.params.id]);
-    if (!result.rows[0]) return res.status(404).json({ error: "Bin not found." });
-
-    await logAudit({
-      userId: req.user!.id,
-      action: "DELETE",
-      recordType: "bin",
-      recordId: Number(req.params.id),
-      description: `${req.user!.fullName} (${req.user!.role}) removed collection point ${result.rows[0].bin_code} (${result.rows[0].location}).`,
-      ip: req.ip,
-    });
-
-    res.json({ ok: true });
-  } catch (err: any) {
-    if (err.code === "23503") {
-      return res.status(409).json({ error: "This bin is still assigned to one or more routes. Unassign it from those stops first." });
+  async function deleteBin(id: number) {
+    if (!confirm("Remove this collection point? This can't be undone.")) return;
+    setBusyId(id);
+    try {
+      await api.delete(`/bins/${id}`);
+      load();
+    } catch (err: any) {
+      alert(err.response?.data?.error || "Couldn't remove this bin.");
+    } finally {
+      setBusyId(null);
     }
-    console.error(err);
-    res.status(500).json({ error: "Couldn't remove this collection point." });
   }
-});
 
-export default router;
+  const critical = bins.filter((b) => b.status === "CRITICAL").length;
+  const nearCapacity = bins.filter((b) => b.status === "NEAR_CAPACITY").length;
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Infrastructure</p>
+          <h1 className="font-display text-2xl font-semibold text-white">Smart Bin & Container Management</h1>
+        </div>
+        <div className="flex items-center gap-3 text-xs">
+          <span className="text-status-critical">{critical} critical</span>
+          <span className="text-status-warning">{nearCapacity} near capacity</span>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="bg-graphite-800 border border-graphite-600 rounded-sm px-3 py-1.5 text-sm text-white"
+          >
+            <option value="">All bins</option>
+            <option value="NORMAL">Normal</option>
+            <option value="NEAR_CAPACITY">Near Capacity</option>
+            <option value="CRITICAL">Critical</option>
+          </select>
+          <Link
+            to="/bins/print-qr"
+            className="text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-200 px-3 py-1.5 rounded-sm"
+          >
+            🖨 Print QR Codes
+          </Link>
+          {canEdit && (
+            <button
+              onClick={() => setShowZoneForm((s) => !s)}
+              className="text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-200 px-3 py-1.5 rounded-sm"
+            >
+              {showZoneForm ? "Cancel" : "+ Add Zone"}
+            </button>
+          )}
+          {canEdit && (
+            <button
+              onClick={() => setShowAddForm((s) => !s)}
+              className="text-xs bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold px-3 py-1.5 rounded-sm"
+            >
+              {showAddForm ? "Cancel" : "+ Add Location"}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {showZoneForm && <ZoneForm onSaved={() => { setShowZoneForm(false); loadZones(); }} />}
+      {showAddForm && <BinForm zones={zones} onSaved={() => { setShowAddForm(false); load(); }} />}
+      {editingBin && (
+        <BinForm
+          zones={zones}
+          existing={editingBin}
+          onSaved={() => { setEditingBin(null); load(); }}
+          onCancel={() => setEditingBin(null)}
+        />
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {loading ? (
+          <p className="text-gray-500 text-sm col-span-full">Loading bins...</p>
+        ) : bins.length === 0 ? (
+          <p className="text-gray-500 text-sm col-span-full">No collection points yet. Add your first one above.</p>
+        ) : (
+          bins.map((b) => {
+            const fill = parseFloat(b.fill_level_pct);
+            return (
+              <div key={b.id} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
+                <div className="flex items-start justify-between mb-2">
+                  <div>
+                    <p className="font-mono text-xs text-gold-500">{b.bin_code}</p>
+                    <p className="text-sm text-gray-300">{b.location}</p>
+                    <p className="text-[11px] text-gray-500">{b.zone_name}</p>
+                  </div>
+                  <span className={`text-[10px] uppercase px-2 py-0.5 rounded-sm text-white ${STATUS_COLORS[b.status]}`}>
+                    {b.status.replace("_", " ")}
+                  </span>
+                </div>
+
+                <div className="mb-2">
+                  <div className="flex justify-between text-xs text-gray-400 mb-1">
+                    <span>Fill level</span>
+                    <span>{fill}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-graphite-900 rounded-full overflow-hidden">
+                    <div className={`h-full ${STATUS_COLORS[b.status]}`} style={{ width: `${fill}%` }} />
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-gray-500 mb-1">{b.waste_type.replace("_", " ")}</p>
+                <p className="text-[11px] text-gray-500">
+                  Last collected: {b.last_collected_at ? new Date(b.last_collected_at).toLocaleDateString() : "—"}
+                </p>
+
+                {canManage && b.status !== "NORMAL" && (
+                  <button
+                    onClick={() => markCollected(b.id)}
+                    disabled={busyId === b.id}
+                    className="mt-3 w-full text-xs bg-gold-500/10 hover:bg-gold-500/20 text-gold-500 border border-gold-500/30 rounded-sm py-1.5 disabled:opacity-50"
+                  >
+                    {busyId === b.id ? "Recording..." : "Mark as Collected"}
+                  </button>
+                )}
+
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <Link
+                    to={`/bins/print-qr?bin=${b.id}`}
+                    className="text-xs text-center bg-graphite-700 hover:bg-graphite-600 text-gray-300 rounded-sm py-1.5"
+                  >
+                    🔲 QR Code
+                  </Link>
+                  {canEdit && (
+                    <button
+                      onClick={() => setEditingBin(b)}
+                      className="text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-300 rounded-sm py-1.5"
+                    >
+                      ✎ Edit
+                    </button>
+                  )}
+                </div>
+                {canEdit && (
+                  <button
+                    onClick={() => deleteBin(b.id)}
+                    disabled={busyId === b.id}
+                    className="mt-2 w-full text-xs text-status-critical/80 hover:text-status-critical disabled:opacity-50"
+                  >
+                    Remove this location
+                  </button>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ZoneForm({ onSaved }: { onSaved: () => void }) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) {
+      setError("Zone name is required.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.post("/zones", { name: name.trim(), description: description.trim() || undefined });
+      onSaved();
+    } catch (err: any) {
+      setError(err.response?.data?.error || "Couldn't add this zone.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4 space-y-3">
+      <p className="text-sm text-white font-medium">Add a new zone / facility area</p>
+      {error && <div className="text-status-critical text-xs">{error}</div>}
+      <label className="block">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Zone name</span>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+          placeholder="e.g. New Warehouse Extension"
+        />
+      </label>
+      <label className="block">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Description (optional)</span>
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+        />
+      </label>
+      <button
+        type="submit"
+        disabled={submitting}
+        className="text-sm bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
+      >
+        {submitting ? "Saving..." : "Add zone"}
+      </button>
+    </form>
+  );
+}
+
+function BinForm({
+  zones,
+  existing,
+  onSaved,
+  onCancel,
+}: {
+  zones: Zone[];
+  existing?: Bin;
+  onSaved: () => void;
+  onCancel?: () => void;
+}) {
+  const [zoneId, setZoneId] = useState(existing?.zone_id?.toString() || "");
+  const [location, setLocation] = useState(existing?.location || "");
+  const [wasteType, setWasteType] = useState(existing?.waste_type || "GENERAL");
+  const [capacity, setCapacity] = useState(existing?.capacity_liters || "1100");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!zoneId || !location.trim()) {
+      setError("Zone and location are required.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const payload = { zone_id: Number(zoneId), location: location.trim(), waste_type: wasteType, capacity_liters: Number(capacity) };
+      if (existing) {
+        await api.patch(`/bins/${existing.id}`, payload);
+      } else {
+        await api.post("/bins", payload);
+      }
+      onSaved();
+    } catch (err: any) {
+      setError(err.response?.data?.error || "Couldn't save this location.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4 space-y-3">
+      <p className="text-sm text-white font-medium">{existing ? `Edit ${existing.bin_code}` : "Add a new collection point"}</p>
+      {error && <div className="text-status-critical text-xs">{error}</div>}
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Zone</span>
+          <select
+            value={zoneId}
+            onChange={(e) => setZoneId(e.target.value)}
+            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+          >
+            <option value="">Select a zone</option>
+            {zones.map((z) => (
+              <option key={z.id} value={z.id}>{z.name}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Waste type</span>
+          <select
+            value={wasteType}
+            onChange={(e) => setWasteType(e.target.value)}
+            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+          >
+            {WASTE_TYPES.map((w) => (
+              <option key={w} value={w}>{w.replace("_", " ")}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <label className="block">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Location description</span>
+        <input
+          value={location}
+          onChange={(e) => setLocation(e.target.value)}
+          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+          placeholder="e.g. Behind Workshop Block C, near loading bay"
+        />
+      </label>
+      <label className="block w-40">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Capacity (liters)</span>
+        <input
+          type="number"
+          value={capacity}
+          onChange={(e) => setCapacity(e.target.value)}
+          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+        />
+      </label>
+      <div className="flex gap-2">
+        <button
+          type="submit"
+          disabled={submitting}
+          className="text-sm bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
+        >
+          {submitting ? "Saving..." : existing ? "Save changes" : "Add location"}
+        </button>
+        {onCancel && (
+          <button type="button" onClick={onCancel} className="text-sm text-gray-400 hover:text-white px-4 py-2">
+            Cancel
+          </button>
+        )}
+      </div>
+    </form>
+  );
+}

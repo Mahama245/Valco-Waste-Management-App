@@ -1,118 +1,205 @@
 import { Router } from "express";
 import { pool } from "../db/pool";
-import { authenticate, authorize } from "../middleware/auth";
+import { authenticate, authorize, AuthedRequest } from "../middleware/auth";
+import { logAudit } from "../utils/audit";
+import { nextBinCode } from "../utils/identifiers";
 
 const router = Router();
-const REPORT_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "MANAGEMENT"];
+const MANAGE_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"];
 
-interface Insight {
-  id: string;
-  title: string;
-  description: string;
-  severity: "info" | "warning" | "critical";
-}
+router.get("/", authenticate, async (req, res) => {
+  const { zone_id, status } = req.query;
+  const clauses: string[] = [];
+  const values: any[] = [];
+  let i = 1;
+  if (zone_id) { clauses.push(`b.zone_id = $${i++}`); values.push(zone_id); }
+  if (status) { clauses.push(`b.status = $${i++}`); values.push(status); }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
-// All insights here are simple rule-based aggregations over real seeded data —
-// there is no ML/AI model behind this. Each one states the rule it applied so
-// it's auditable, and the UI labels the whole section as recommendations.
-router.get("/", authenticate, authorize(...REPORT_ROLES), async (_req, res) => {
-  const insights: Insight[] = [];
-
-  // Rule 1: zones with a missed-collection rate above 20% (min 3 scheduled, so small samples don't skew this)
-  const missedZones = await pool.query(
-    `SELECT z.name, COUNT(*)::int AS total, COUNT(*) FILTER (WHERE c.status='MISSED')::int AS missed
-     FROM collections c JOIN zones z ON z.id = c.zone_id
-     GROUP BY z.name HAVING COUNT(*) >= 3
-     ORDER BY (COUNT(*) FILTER (WHERE c.status='MISSED')::float / COUNT(*)) DESC LIMIT 3`
-  );
-  for (const row of missedZones.rows) {
-    const rate = Math.round((row.missed / row.total) * 100);
-    if (rate >= 15) {
-      insights.push({
-        id: `missed-zone-${row.name}`,
-        title: `${row.name} has a high missed-collection rate`,
-        description: `${row.missed} of ${row.total} scheduled collections were missed (${rate}%) in the seeded data. Consider reviewing route assignment or access conditions in this zone.`,
-        severity: rate >= 30 ? "critical" : "warning",
-      });
-    }
-  }
-
-  // Rule 2: bins currently at critical or near-capacity — candidates for increased pickup frequency
-  const hotBins = await pool.query(
-    `SELECT z.name AS zone_name, COUNT(*)::int AS bin_count
+  const result = await pool.query(
+    `SELECT b.id, b.bin_code, b.zone_id, z.name AS zone_name, b.location, b.lat, b.lng, b.waste_type,
+            b.capacity_liters, b.fill_level_pct, b.status, b.condition, b.last_collected_at, b.next_scheduled_at
      FROM bins b JOIN zones z ON z.id = b.zone_id
-     WHERE b.status IN ('CRITICAL','NEAR_CAPACITY')
-     GROUP BY z.name ORDER BY bin_count DESC LIMIT 3`
+     ${where}
+     ORDER BY b.fill_level_pct DESC`,
+    values
   );
-  for (const row of hotBins.rows) {
-    if (row.bin_count >= 2) {
-      insights.push({
-        id: `bins-${row.zone_name}`,
-        title: `${row.zone_name} has multiple bins near capacity`,
-        description: `${row.bin_count} bins in this zone are currently at Near Capacity or Critical fill level. A recommended action is increasing collection frequency for this zone.`,
-        severity: "warning",
-      });
-    }
-  }
+  res.json({ bins: result.rows });
+});
 
-  // Rule 3: collectors with the most missed jobs (repeated delays proxy)
-  const delayedCollectors = await pool.query(
-    `SELECT u.full_name, COUNT(*) FILTER (WHERE c.status='MISSED')::int AS missed
-     FROM users u JOIN collections c ON c.collector_id = u.id
-     WHERE u.role='COLLECTOR'
-     GROUP BY u.full_name HAVING COUNT(*) FILTER (WHERE c.status='MISSED') >= 2
-     ORDER BY missed DESC LIMIT 3`
+router.get("/alerts", authenticate, async (_req, res) => {
+  const result = await pool.query(
+    `SELECT b.id, b.bin_code, z.name AS zone_name, b.fill_level_pct, b.status
+     FROM bins b JOIN zones z ON z.id = b.zone_id
+     WHERE b.fill_level_pct >= 70
+     ORDER BY b.fill_level_pct DESC`
   );
-  for (const row of delayedCollectors.rows) {
-    insights.push({
-      id: `collector-${row.full_name}`,
-      title: `${row.full_name} has ${row.missed} missed collections`,
-      description: `This collector has repeated missed collections in the seeded history. Consider checking in on route load or recurring obstacles.`,
-      severity: "info",
+  res.json({ alerts: result.rows });
+});
+
+// Simulates an IoT sensor push updating fill level (in a real deployment this
+// would be called by the sensor gateway, not a human via the UI)
+router.patch("/:id/fill-level", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
+  const { fill_level_pct } = req.body || {};
+  if (typeof fill_level_pct !== "number" || fill_level_pct < 0 || fill_level_pct > 100) {
+    return res.status(400).json({ error: "fill_level_pct must be a number between 0 and 100." });
+  }
+  const status = fill_level_pct >= 95 ? "CRITICAL" : fill_level_pct >= 70 ? "NEAR_CAPACITY" : "NORMAL";
+
+  const result = await pool.query(
+    `UPDATE bins SET fill_level_pct = $1, status = $2, updated_at = now() WHERE id = $3 RETURNING *`,
+    [fill_level_pct, status, req.params.id]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: "Bin not found." });
+
+  if (status !== "NORMAL") {
+    await logAudit({
+      userId: req.user!.id,
+      action: "UPDATE",
+      recordType: "bin",
+      recordId: Number(req.params.id),
+      description: `Bin ${result.rows[0].bin_code} reached ${fill_level_pct}% fill (${status}).`,
+      ip: req.ip,
     });
   }
 
-  // Rule 4: days with unusually high completed waste volume (> mean + 1 stddev)
-  const dailyVolume = await pool.query(
-    `SELECT scheduled_date, COALESCE(SUM(quantity_collected_kg),0) AS kg
-     FROM collections WHERE status='COMPLETED' GROUP BY scheduled_date`
-  );
-  const volumes = dailyVolume.rows.map((r) => parseFloat(r.kg));
-  if (volumes.length > 2) {
-    const mean = volumes.reduce((a, b) => a + b, 0) / volumes.length;
-    const variance = volumes.reduce((a, b) => a + (b - mean) ** 2, 0) / volumes.length;
-    const stddev = Math.sqrt(variance);
-    const spikes = dailyVolume.rows.filter((r) => parseFloat(r.kg) > mean + stddev);
-    if (spikes.length > 0) {
-      const top = spikes.sort((a, b) => parseFloat(b.kg) - parseFloat(a.kg))[0];
-      insights.push({
-        id: "volume-spike",
-        title: `Unusually high waste volume on ${new Date(top.scheduled_date).toLocaleDateString()}`,
-        description: `${Math.round(parseFloat(top.kg))} kg was collected that day, above the average of ${Math.round(mean)} kg by more than one standard deviation. Worth checking for a one-off event or a data entry anomaly.`,
-        severity: "info",
-      });
+  res.json({ bin: result.rows[0] });
+});
+
+router.patch("/:id/collected", authenticate, authorize(...MANAGE_ROLES, "COLLECTOR"), async (req: AuthedRequest, res) => {
+  // A collector may only mark a bin collected if it's actually assigned to
+  // one of their own route stops for today. Managers/admins can mark any
+  // bin (they're not doing the physical collection, they're correcting
+  // records), but a collector marking arbitrary bins done — bins they were
+  // never near — is exactly the kind of false-completion this must prevent.
+  if (req.user!.role === "COLLECTOR") {
+    const assigned = await pool.query(
+      `SELECT rs.id FROM route_stops rs
+       JOIN routes r ON r.id = rs.route_id
+       WHERE rs.bin_id = $1 AND r.collector_id = $2 AND r.scheduled_date = CURRENT_DATE`,
+      [req.params.id, req.user!.id]
+    );
+    if (!assigned.rows[0]) {
+      return res.status(403).json({ error: "This bin isn't assigned to one of your route stops today." });
     }
   }
 
-  // Rule 5: open critical incidents older than 3 days — needs attention
-  const staleIncidents = await pool.query(
-    `SELECT COUNT(*)::int AS count FROM incidents
-     WHERE status NOT IN ('RESOLVED','CLOSED') AND severity = 'CRITICAL' AND created_at < now() - interval '3 days'`
+  const result = await pool.query(
+    `UPDATE bins SET fill_level_pct = 0, status = 'NORMAL', last_collected_at = now(),
+       next_scheduled_at = now() + interval '2 days', updated_at = now()
+     WHERE id = $1 RETURNING *`,
+    [req.params.id]
   );
-  if (staleIncidents.rows[0].count > 0) {
-    insights.push({
-      id: "stale-critical-incidents",
-      title: `${staleIncidents.rows[0].count} critical incident(s) open for over 3 days`,
-      description: `These tickets have gone unresolved past a reasonable window for CRITICAL severity. Recommend escalating to HSE leadership.`,
-      severity: "critical",
-    });
-  }
+  if (!result.rows[0]) return res.status(404).json({ error: "Bin not found." });
 
-  res.json({
-    generated_at: new Date().toISOString(),
-    disclaimer: "These are rule-based recommendations computed from historical data, not AI predictions. Each insight states the rule that produced it.",
-    insights,
+  await logAudit({
+    userId: req.user!.id,
+    action: "UPDATE",
+    recordType: "bin",
+    recordId: Number(req.params.id),
+    description: `${req.user!.fullName} (${req.user!.role}) marked bin ${result.rows[0].bin_code} as collected.`,
+    ip: req.ip,
   });
+
+  res.json({ bin: result.rows[0] });
+});
+
+router.get("/by-code/:code", authenticate, async (req, res) => {
+  const result = await pool.query(
+    `SELECT b.id, b.bin_code, b.location, z.name AS zone_name, b.waste_type, b.fill_level_pct, b.status
+     FROM bins b JOIN zones z ON z.id = b.zone_id WHERE b.bin_code = $1`,
+    [req.params.code]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: "No bin with that code." });
+  res.json({ bin: result.rows[0] });
+});
+
+// Create a new bin (a new physical collection point / location).
+router.post("/", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
+  const { zone_id, location, waste_type, capacity_liters, lat, lng } = req.body || {};
+  if (!zone_id || !location) {
+    return res.status(400).json({ error: "zone_id and location are required." });
+  }
+
+  const binCode = await nextBinCode();
+
+  const result = await pool.query(
+    `INSERT INTO bins (bin_code, zone_id, location, lat, lng, waste_type, capacity_liters)
+     VALUES ($1,$2,$3,$4,$5,COALESCE($6,'GENERAL')::waste_type,COALESCE($7,1100))
+     RETURNING *`,
+    [binCode, zone_id, location, lat || null, lng || null, waste_type, capacity_liters]
+  );
+
+  await logAudit({
+    userId: req.user!.id,
+    action: "CREATE",
+    recordType: "bin",
+    recordId: result.rows[0].id,
+    description: `${req.user!.fullName} (${req.user!.role}) added a new collection point: ${binCode} at ${location}.`,
+    ip: req.ip,
+  });
+
+  res.status(201).json({ bin: result.rows[0] });
+});
+
+// Edit an existing bin's details (location, zone, waste type, capacity, coordinates).
+router.patch("/:id", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
+  const { zone_id, location, waste_type, capacity_liters, lat, lng, condition } = req.body || {};
+
+  const before = await pool.query("SELECT * FROM bins WHERE id = $1", [req.params.id]);
+  if (!before.rows[0]) return res.status(404).json({ error: "Bin not found." });
+
+  const result = await pool.query(
+    `UPDATE bins SET
+       zone_id = COALESCE($1, zone_id),
+       location = COALESCE($2, location),
+       waste_type = COALESCE($3, waste_type),
+       capacity_liters = COALESCE($4, capacity_liters),
+       lat = COALESCE($5, lat),
+       lng = COALESCE($6, lng),
+       condition = COALESCE($7, condition),
+       updated_at = now()
+     WHERE id = $8 RETURNING *`,
+    [zone_id, location, waste_type, capacity_liters, lat, lng, condition, req.params.id]
+  );
+
+  await logAudit({
+    userId: req.user!.id,
+    action: "UPDATE",
+    recordType: "bin",
+    recordId: Number(req.params.id),
+    description: `${req.user!.fullName} (${req.user!.role}) updated collection point ${before.rows[0].bin_code}.`,
+    previousValue: before.rows[0],
+    newValue: result.rows[0],
+    ip: req.ip,
+  });
+
+  res.json({ bin: result.rows[0] });
+});
+
+// Remove a bin that no longer exists physically (e.g. decommissioned location).
+router.delete("/:id", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
+  try {
+    const result = await pool.query("DELETE FROM bins WHERE id = $1 RETURNING bin_code, location", [req.params.id]);
+    if (!result.rows[0]) return res.status(404).json({ error: "Bin not found." });
+
+    await logAudit({
+      userId: req.user!.id,
+      action: "DELETE",
+      recordType: "bin",
+      recordId: Number(req.params.id),
+      description: `${req.user!.fullName} (${req.user!.role}) removed collection point ${result.rows[0].bin_code} (${result.rows[0].location}).`,
+      ip: req.ip,
+    });
+
+    res.json({ ok: true });
+  } catch (err: any) {
+    if (err.code === "23503") {
+      return res.status(409).json({ error: "This bin is still assigned to one or more routes. Unassign it from those stops first." });
+    }
+    console.error(err);
+    res.status(500).json({ error: "Couldn't remove this collection point." });
+  }
 });
 
 export default router;

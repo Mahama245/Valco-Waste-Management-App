@@ -1,19 +1,46 @@
+import { Router } from "express";
 import { pool } from "../db/pool";
+import { authenticate, authorize, AuthedRequest } from "../middleware/auth";
+import { nextComplaintCode } from "../utils/identifiers";
 
-export async function logAudit(params: {
-  userId?: number | null;
-  action: string;
-  recordType: string;
-  recordId?: number | null;
-  description: string;
-  previousValue?: any;
-  newValue?: any;
-  ip?: string;
-}) {
-  const { userId, action, recordType, recordId, description, previousValue, newValue, ip } = params;
-  await pool.query(
-    `INSERT INTO audit_logs (user_id, action, record_type, record_id, description, previous_value, new_value, ip_address)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [userId ?? null, action, recordType, recordId ?? null, description, previousValue ? JSON.stringify(previousValue) : null, newValue ? JSON.stringify(newValue) : null, ip ?? null]
+const router = Router();
+const STAFF_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"];
+
+// Residents see only their own complaints; staff see all
+router.get("/", authenticate, async (req: AuthedRequest, res) => {
+  const isStaff = STAFF_ROLES.includes(req.user!.role);
+  const result = await pool.query(
+    isStaff
+      ? `SELECT c.*, u.full_name AS resident_name FROM complaints c JOIN users u ON u.id = c.resident_id ORDER BY c.created_at DESC`
+      : `SELECT c.* FROM complaints c WHERE c.resident_id = $1 ORDER BY c.created_at DESC`,
+    isStaff ? [] : [req.user!.id]
   );
-}
+  res.json({ complaints: result.rows });
+});
+
+router.post("/", authenticate, async (req: AuthedRequest, res) => {
+  const { category, location, description } = req.body || {};
+  if (!category || !description) return res.status(400).json({ error: "category and description are required." });
+
+  const tracking = await nextComplaintCode();
+
+  const result = await pool.query(
+    `INSERT INTO complaints (tracking_number, resident_id, category, location, description)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [tracking, req.user!.id, category, location || null, description]
+  );
+  res.status(201).json({ complaint: result.rows[0] });
+});
+
+router.patch("/:id", authenticate, authorize(...STAFF_ROLES), async (req, res) => {
+  const { status, response } = req.body || {};
+  const result = await pool.query(
+    `UPDATE complaints SET status = COALESCE($1, status), response = COALESCE($2, response), updated_at = now()
+     WHERE id = $3 RETURNING *`,
+    [status, response, req.params.id]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: "Complaint not found." });
+  res.json({ complaint: result.rows[0] });
+});
+
+export default router;

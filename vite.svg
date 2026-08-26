@@ -1,43 +1,26 @@
-import axios from "axios";
+interface Props {
+  label: string;
+  value: string | number;
+  accent?: "gold" | "success" | "warning" | "critical" | "info";
+  suffix?: string;
+}
 
-export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://localhost:4000/api",
-  // Render's free tier can take 50+ seconds to wake a sleeping service on
-  // its first request. A short default timeout would misreport that delay
-  // as "can't contact the server" when it's actually just waking up.
-  timeout: 60000,
-});
+const ACCENTS: Record<string, string> = {
+  gold: "border-l-gold-500",
+  success: "border-l-status-success",
+  warning: "border-l-status-warning",
+  critical: "border-l-status-critical",
+  info: "border-l-status-info",
+};
 
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("valco_token");
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
-
-api.interceptors.response.use(
-  (res) => res,
-  (err) => {
-    if (err.response?.status === 401) {
-      localStorage.removeItem("valco_token");
-      localStorage.removeItem("valco_user");
-      if (!window.location.pathname.includes("/login")) {
-        window.location.href = "/login";
-      }
-    }
-    // No response at all (network error, CORS block, timeout) — attach a
-    // clearer message so screens don't just say a generic "couldn't
-    // connect" with no explanation of what's actually likely happening.
-    if (!err.response) {
-      err.friendlyMessage =
-        "Couldn't reach the server. If this is the first request in a while, the server may be waking up — please wait a moment and try again.";
-    }
-    return Promise.reject(err);
-  }
-);
-
-export interface CurrentUser {
-  id: number;
-  username: string;
-  fullName: string;
-  role: string;
+export default function KpiCard({ label, value, accent = "gold", suffix }: Props) {
+  return (
+    <div className={`bg-graphite-800 border border-graphite-700 border-l-[3px] ${ACCENTS[accent]} rounded-sm p-4`}>
+      <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-2">{label}</p>
+      <p className="font-display text-3xl font-semibold text-white">
+        {value}
+        {suffix && <span className="text-base text-gray-400 ml-1 font-body">{suffix}</span>}
+      </p>
+    </div>
+  );
 }

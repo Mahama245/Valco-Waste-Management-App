@@ -1,37 +1,51 @@
--- VALCO Waste Management Platform — Phase 3 schema additions
--- Adds: route planning (routes + ordered stops linking to collections)
+import { pool } from "../db/pool";
 
-CREATE TYPE route_status AS ENUM ('PLANNED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED');
+// Atomically reserves the next number for a given counter and returns it.
+// Uses UPDATE ... RETURNING inside a single statement, which Postgres
+// executes atomically — two concurrent requests can never receive the same
+// number, unlike the previous SELECT COUNT(*) + 1 approach.
+async function nextCounterValue(counterKey: string): Promise<number> {
+  const result = await pool.query(
+    `INSERT INTO id_counters (counter_key, next_value) VALUES ($1, 2)
+     ON CONFLICT (counter_key) DO UPDATE SET next_value = id_counters.next_value + 1
+     RETURNING next_value - 1 AS reserved`,
+    [counterKey]
+  );
+  return result.rows[0].reserved;
+}
 
-CREATE TABLE routes (
-  id SERIAL PRIMARY KEY,
-  route_code VARCHAR(30) UNIQUE NOT NULL, -- e.g. RT-2026-008
-  name VARCHAR(150) NOT NULL,
-  collector_id INTEGER REFERENCES users(id),
-  vehicle_id INTEGER REFERENCES vehicles(id),
-  scheduled_date DATE NOT NULL,
-  estimated_distance_km NUMERIC(6,1),
-  estimated_duration_min INTEGER,
-  status route_status NOT NULL DEFAULT 'PLANNED',
-  started_at TIMESTAMPTZ,
-  completed_at TIMESTAMPTZ,
-  created_by INTEGER REFERENCES users(id),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+// Year is computed at generation time, not hardcoded, so identifiers roll
+// over correctly at each new year without any code change.
+function currentYear(): number {
+  return new Date().getFullYear();
+}
 
-CREATE TABLE route_stops (
-  id SERIAL PRIMARY KEY,
-  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
-  collection_id INTEGER REFERENCES collections(id),
-  stop_order INTEGER NOT NULL,
-  status VARCHAR(20) NOT NULL DEFAULT 'PENDING', -- PENDING | COMPLETED | SKIPPED
-  arrived_at TIMESTAMPTZ,
-  -- offline-first support: collectors can complete a stop while offline; the
-  -- client stamps a local timestamp and flips this true, then the sync
-  -- endpoint reconciles it against the server record once back online.
-  synced BOOLEAN NOT NULL DEFAULT true,
-  UNIQUE (route_id, stop_order)
-);
+export async function nextCollectionCode(): Promise<string> {
+  const n = await nextCounterValue("collection");
+  return `WM-${currentYear()}-${String(n).padStart(6, "0")}`;
+}
 
-CREATE INDEX idx_route_stops_route ON route_stops(route_id);
-CREATE INDEX idx_routes_collector_date ON routes(collector_id, scheduled_date);
+export async function nextIncidentCode(): Promise<string> {
+  const n = await nextCounterValue("incident");
+  return `INC-${currentYear()}-${String(10000 + n)}`;
+}
+
+export async function nextComplaintCode(): Promise<string> {
+  const n = await nextCounterValue("complaint");
+  return `CMP-${currentYear()}-${String(10000 + n)}`;
+}
+
+export async function nextRouteCode(): Promise<string> {
+  const n = await nextCounterValue("route");
+  return `RT-${currentYear()}-${String(n).padStart(3, "0")}`;
+}
+
+export async function nextBinCode(): Promise<string> {
+  const n = await nextCounterValue("bin");
+  return `WM-BIN-${String(10000 + n)}`;
+}
+
+export async function nextZoneCode(): Promise<string> {
+  const n = await nextCounterValue("zone");
+  return "Z" + String(n).padStart(3, "0");
+}

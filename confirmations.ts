@@ -67,6 +67,39 @@ router.get("/me", authenticate, async (req: AuthedRequest, res) => {
   res.json({ user: req.user });
 });
 
+// Any logged-in user — including admins — changing their OWN password.
+// Requires the current password, unlike an admin resetting someone else's
+// (/api/users/:id/reset-password), which is a different action with
+// different trust assumptions.
+router.patch("/change-password", authenticate, async (req: AuthedRequest, res) => {
+  const { current_password, new_password } = req.body || {};
+  if (!current_password || !new_password) {
+    return res.status(400).json({ error: "current_password and new_password are required." });
+  }
+  if (new_password.length < 6) {
+    return res.status(400).json({ error: "new_password must be at least 6 characters." });
+  }
+
+  const user = await pool.query("SELECT password_hash FROM users WHERE id = $1", [req.user!.id]);
+  if (!user.rows[0] || !bcrypt.compareSync(current_password, user.rows[0].password_hash)) {
+    return res.status(401).json({ error: "Current password is incorrect." });
+  }
+
+  const hash = bcrypt.hashSync(new_password, 10);
+  await pool.query("UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2", [hash, req.user!.id]);
+
+  await logAudit({
+    userId: req.user!.id,
+    action: "UPDATE",
+    recordType: "user",
+    recordId: req.user!.id,
+    description: `${req.user!.fullName} changed their own password.`,
+    ip: req.ip,
+  });
+
+  res.json({ ok: true });
+});
+
 // Public self-registration — residents only. Staff accounts (collectors,
 // supervisors, admins, etc.) are still created by an administrator via
 // /api/users, never through this open endpoint.
