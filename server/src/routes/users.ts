@@ -26,7 +26,7 @@ router.post("/", authenticate, authorize(...ADMIN_ROLES), async (req: AuthedRequ
     const result = await pool.query(
       `INSERT INTO users (full_name, username, email, password_hash, role, department, zone_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, full_name, username, email, role, department, is_active`,
-      [full_name, username.toLowerCase(), email, hash, role, department, zone_id]
+      [full_name, username.toLowerCase(), email || null, hash, role, department || null, zone_id || null]
     );
     await logAudit({
       userId: req.user!.id,
