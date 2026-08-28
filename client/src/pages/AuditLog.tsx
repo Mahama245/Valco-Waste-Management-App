@@ -36,7 +36,11 @@ export default function AuditLog() {
       .catch(() => setError("Couldn't load the audit log."))
       .finally(() => setLoading(false));
   }
-  useEffect(load, []);
+ useEffect(() => {
+  load(); // initial load
+  const interval = setInterval(load, 5000);
+  return () => clearInterval(interval);
+}, []);
 
   async function deleteEntry(id: number) {
     if (!confirm("Delete this log entry permanently?")) return;
