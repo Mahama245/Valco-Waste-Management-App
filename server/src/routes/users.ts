@@ -38,7 +38,15 @@ router.post("/", authenticate, authorize(...ADMIN_ROLES), async (req: AuthedRequ
     });
     res.status(201).json({ user: result.rows[0] });
   } catch (err: any) {
-    if (err.code === "23505") return res.status(409).json({ error: "Username or email already exists." });
+    if (err.code === "23505") {
+      console.error("ADMIN CREATE duplicate-key detail:", err.detail, "| constraint:", err.constraint);
+      const field = err.constraint?.includes("email")
+        ? "email"
+        : err.constraint?.includes("username")
+        ? "username"
+        : "username or email";
+      return res.status(409).json({ error: `That ${field} already exists.` });
+    }
     console.error(err);
     res.status(500).json({ error: "Server error creating user." });
   }
