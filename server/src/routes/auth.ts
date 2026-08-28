@@ -101,12 +101,14 @@ router.post("/register", async (req, res) => {
       user: { id: user.id, username: user.username, fullName: user.full_name, role: user.role },
     });
   } catch (err: any) {
-    // The pre-check above only looks at username — it never checked email,
-    // so a duplicate email was hitting the database's own unique
-    // constraint and falling through to the generic 500 below instead of
-    // a proper, honest error message.
     if (err.code === "23505") {
-      return res.status(409).json({ error: "That username or email is already registered." });
+      console.error("REGISTER duplicate-key detail:", err.detail, "| constraint:", err.constraint);
+      const field = err.constraint?.includes("email")
+        ? "email"
+        : err.constraint?.includes("username")
+        ? "username"
+        : "username or email";
+      return res.status(409).json({ error: `That ${field} is already registered.` });
     }
     console.error(err);
     res.status(500).json({ error: "Server error during registration." });
