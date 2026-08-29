@@ -117,7 +117,7 @@ router.patch("/:id/status", authenticate, authorize(...MANAGE_ROLES, "COLLECTOR"
     [status, quantity_collected_kg, missed_reason, actual_pickup_time, req.params.id]
   );
 
-  await logAudit({
+   await logAudit({
     userId: req.user!.id,
     action: "UPDATE",
     recordType: "collection",
@@ -127,6 +127,36 @@ router.patch("/:id/status", authenticate, authorize(...MANAGE_ROLES, "COLLECTOR"
     newValue: result.rows[0],
     ip: req.ip,
   });
+
+  if (status === "COMPLETED" || status === "MISSED") {
+    const collection = result.rows[0];
+    const verb = status === "COMPLETED" ? "completed" : "missed";
+
+    const residents = await pool.query(
+      "SELECT id FROM users WHERE role = 'RESIDENT' AND zone_id = $1 AND is_active = true",
+      [collection.zone_id]
+    );
+    const staff = await pool.query(
+      "SELECT id FROM users WHERE role IN ('SUPER_ADMIN','ICT_ADMIN','WASTE_MANAGER','SUPERVISOR') AND is_active = true"
+    );
+
+    const recipients = [...residents.rows, ...staff.rows];
+    for (const r of recipients) {
+      await pool.query(
+        `INSERT INTO notifications (user_id, type, title, body, record_type, record_id)
+         VALUES ($1, $2, $3, $4, 'collection', $5)`,
+        [
+          r.id,
+          status === "COMPLETED" ? "collection_completed" : "missed_collection",
+          status === "COMPLETED" ? "Collection completed" : "Collection missed",
+          `Collection ${collection.collection_code} at ${collection.location} was ${verb}${
+            quantity_collected_kg ? ` — ${quantity_collected_kg}kg collected` : ""
+          }.`,
+          collection.id,
+        ]
+      );
+    }
+  }
 
   res.json({ collection: result.rows[0] });
 });
