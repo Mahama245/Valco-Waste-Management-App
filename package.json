@@ -1,48 +1,32 @@
-import { Router } from "express";
-import { pool } from "../db/pool";
-import { authenticate, AuthedRequest } from "../middleware/auth";
+# React + TypeScript + Vite
 
-const router = Router();
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
-// Recent completed collections in the resident's own zone, so they have
-// something concrete to confirm/rate (rather than guessing a collection ID).
-router.get("/recent-in-my-zone", authenticate, async (req: AuthedRequest, res) => {
-  const me = await pool.query("SELECT zone_id FROM users WHERE id = $1", [req.user!.id]);
-  const zoneId = me.rows[0]?.zone_id;
-  if (!zoneId) return res.json({ collections: [] });
+Currently, two official plugins are available:
 
-  const result = await pool.query(
-    `SELECT c.id, c.collection_code, c.location, c.scheduled_date, c.actual_pickup_time, c.waste_type,
-            cc.id AS confirmation_id, cc.rating, cc.comment
-     FROM collections c
-     LEFT JOIN collection_confirmations cc ON cc.collection_id = c.id AND cc.resident_id = $1
-     WHERE c.zone_id = $2 AND c.status = 'COMPLETED'
-     ORDER BY c.actual_pickup_time DESC NULLS LAST LIMIT 10`,
-    [req.user!.id, zoneId]
-  );
-  res.json({ collections: result.rows });
-});
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-router.post("/", authenticate, async (req: AuthedRequest, res) => {
-  const { collection_id, rating, comment } = req.body || {};
-  if (!collection_id) return res.status(400).json({ error: "collection_id is required." });
-  if (rating !== undefined && rating !== null && (rating < 1 || rating > 5)) {
-    return res.status(400).json({ error: "rating must be between 1 and 5." });
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the Oxlint configuration
+
+If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+
+```json
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "oxc"],
+  "options": {
+    "typeAware": true
+  },
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/only-export-components": ["warn", { "allowConstantExport": true }]
   }
+}
+```
 
-  try {
-    const result = await pool.query(
-      `INSERT INTO collection_confirmations (collection_id, resident_id, rating, comment)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (collection_id, resident_id) DO UPDATE SET rating = EXCLUDED.rating, comment = EXCLUDED.comment
-       RETURNING *`,
-      [collection_id, req.user!.id, rating || null, comment || null]
-    );
-    res.status(201).json({ confirmation: result.rows[0] });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Couldn't save your confirmation." });
-  }
-});
-
-export default router;
+See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.

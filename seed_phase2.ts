@@ -1,47 +1,36 @@
-import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
-
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  // Fail safely at startup rather than silently signing tokens with a
-  // publicly-known default secret. A missing secret is a configuration
-  // error, not something to paper over.
-  throw new Error(
-    "FATAL: JWT_SECRET environment variable is not set. Set it in your .env file (local) or your host's Environment settings (production). Refusing to start with an insecure default."
-  );
-}
-// Already validated non-empty above; this explicit typing just satisfies
-// TS's control-flow narrowing, which doesn't propagate into the closures below.
-const SECRET: string = JWT_SECRET;
-
-export interface AuthedRequest extends Request {
-  user?: { id: number; username: string; role: string; fullName: string };
-}
-
-export function authenticate(req: AuthedRequest, res: Response, next: NextFunction) {
-  const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ error: "Missing authentication token." });
-  try {
-    const payload = jwt.verify(token, SECRET) as any;
-    req.user = { id: payload.id, username: payload.username, role: payload.role, fullName: payload.fullName };
-    next();
-  } catch {
-    return res.status(401).json({ error: "Invalid or expired token." });
+{
+  "name": "client",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.19.0",
+    "html5-qrcode": "^2.3.8",
+    "leaflet": "^1.9.4",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-leaflet": "^5.0.0",
+    "react-router-dom": "^7.18.2",
+    "recharts": "^3.10.1"
+  },
+  "devDependencies": {
+    "@types/leaflet": "^1.9.22",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "autoprefixer": "^10.5.4",
+    "oxlint": "^1.75.0",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0"
   }
-}
-
-// Usage: authorize('SUPER_ADMIN', 'ICT_ADMIN')
-export function authorize(...allowedRoles: string[]) {
-  return (req: AuthedRequest, res: Response, next: NextFunction) => {
-    if (!req.user) return res.status(401).json({ error: "Not authenticated." });
-    if (!allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({ error: "You don't have permission to perform this action." });
-    }
-    next();
-  };
-}
-
-export function signToken(user: { id: number; username: string; role: string; fullName: string }) {
-  return jwt.sign(user, SECRET, { expiresIn: "12h" });
 }

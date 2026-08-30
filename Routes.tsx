@@ -1,164 +1,249 @@
 import { useEffect, useState } from "react";
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend,
-} from "recharts";
+import { QRCodeSVG } from "qrcode.react";
 import { api } from "../api";
-import KpiCard from "../components/KpiCard";
+import StatusBadge from "../components/StatusBadge";
 
-interface Summary {
-  kpis: {
-    scheduled_today: number;
-    completed_today: number;
-    pending_today: number;
-    missed_today: number;
-    kg_collected_today: number;
-    collection_efficiency_pct: number;
-    critical_bin_alerts: number;
-    near_capacity_bins: number;
-    open_incidents: number;
-    critical_incidents: number;
-    active_vehicles: number;
-    total_vehicles: number;
-  };
-  status_counts: { status: string; count: number }[];
-  waste_composition: { waste_type: string; total_kg: string; count: number }[];
-  zone_performance: { zone_name: string; completed: number; missed: number; total: number }[];
-  recent_activity: { description: string; created_at: string }[];
+interface MyBin {
+  id: number;
+  bin_code: string;
+  location: string;
+  zone_name: string;
+  fill_level_pct: number;
+  status: string;
+  last_collected_at: string | null;
+  next_scheduled_at: string | null;
 }
 
-const WASTE_COLORS: Record<string, string> = {
-  GENERAL: "#4A535C",
-  PLASTIC: "#5A9BD8",
-  PAPER: "#C9A24B",
-  METAL: "#8B8F94",
-  GLASS: "#3FA34D",
-  ORGANIC: "#7BAE4F",
-  HAZARDOUS: "#E5555A",
-  E_WASTE: "#B885D8",
-  OTHER: "#6B7076",
-};
+interface Complaint {
+  id: number;
+  tracking_number: string;
+  category: string;
+  location: string;
+  description: string;
+  status: string;
+  response: string | null;
+  created_at: string;
+}
 
-export default function Dashboard() {
-  const [data, setData] = useState<Summary | null>(null);
-  const [error, setError] = useState<string | null>(null);
+interface RecentCollection {
+  id: number;
+  collection_code: string;
+  location: string;
+  actual_pickup_time: string | null;
+  waste_type: string;
+  confirmation_id: number | null;
+  rating: number | null;
+  comment: string | null;
+}
 
-  useEffect(() => {
-    api
-      .get("/dashboard/summary")
-      .then((res) => setData(res.data))
-      .catch(() => setError("Couldn't load dashboard data."));
-  }, []);
+const CATEGORIES = [
+  { value: "missed_collection", label: "Missed Collection" },
+  { value: "overflowing_bin", label: "Overflowing Bin" },
+  { value: "illegal_dumping", label: "Illegal Dumping" },
+  { value: "damaged_bin", label: "Damaged Bin" },
+  { value: "other", label: "Other" },
+];
 
-  if (error) return <div className="text-status-critical">{error}</div>;
-  if (!data) return <DashboardSkeleton />;
+export default function ResidentPortal() {
+  const [complaints, setComplaints] = useState<Complaint[]>([]);
+  const [recent, setRecent] = useState<RecentCollection[]>([]);
+  const [myBin, setMyBin] = useState<MyBin | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  const { kpis } = data;
+  function load() {
+    setLoading(true);
+    Promise.all([
+      api.get("/complaints"),
+      api.get("/confirmations/recent-in-my-zone"),
+      api.get("/bins/my-bin"),
+    ])
+      .then(([c, r, b]) => {
+        setComplaints(c.data.complaints);
+        setRecent(r.data.collections);
+        setMyBin(b.data.bin);
+      })
+      .finally(() => setLoading(false));
+  }
+  useEffect(load, []);
+
+  async function submitConfirmation(collectionId: number, rating: number) {
+    await api.post("/confirmations", { collection_id: collectionId, rating });
+    load();
+  }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-2xl">
       <div>
-        <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Waste Operations</p>
-        <h1 className="font-display text-2xl font-semibold text-white">Command Center</h1>
+        <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Resident Portal</p>
+        <h1 className="font-display text-2xl font-semibold text-white">Waste Collection</h1>
       </div>
 
-      {/* Top KPI row */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <KpiCard label="Scheduled Today" value={kpis.scheduled_today} accent="info" />
-        <KpiCard label="Completed Today" value={kpis.completed_today} accent="success" />
-        <KpiCard label="Pending" value={kpis.pending_today} accent="gold" />
-        <KpiCard label="Missed Today" value={kpis.missed_today} accent="critical" />
-        <KpiCard label="Kg Collected Today" value={kpis.kg_collected_today.toLocaleString()} suffix="kg" accent="gold" />
-        <KpiCard label="Collection Efficiency" value={kpis.collection_efficiency_pct} suffix="%" accent="success" />
-      </div>
-
-      {/* Fleet / bins / incidents row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard label="Active Vehicles" value={`${kpis.active_vehicles} / ${kpis.total_vehicles}`} accent="info" />
-        <KpiCard label="Critical Bin Alerts" value={kpis.critical_bin_alerts} accent="critical" />
-        <KpiCard label="Near-Capacity Bins" value={kpis.near_capacity_bins} accent="warning" />
-        <KpiCard label="Open Incidents" value={kpis.open_incidents} suffix={kpis.critical_incidents ? `(${kpis.critical_incidents} critical)` : undefined} accent={kpis.critical_incidents ? "critical" : "warning"} />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Zone performance */}
-        <div className="lg:col-span-2 bg-graphite-800 border border-graphite-700 rounded-sm p-5">
-          <h2 className="font-display text-sm uppercase tracking-wider text-gray-300 mb-4">
-            Collection Performance by Zone
-          </h2>
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={data.zone_performance} layout="vertical" margin={{ left: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#262B30" horizontal={false} />
-              <XAxis type="number" stroke="#6B7076" fontSize={11} />
-              <YAxis dataKey="zone_name" type="category" width={150} stroke="#6B7076" fontSize={11} />
-              <Tooltip
-                contentStyle={{ background: "#1C2024", border: "1px solid #343B42", fontSize: 12 }}
-                labelStyle={{ color: "#fff" }}
-              />
-              <Bar dataKey="completed" stackId="a" fill="#3FA34D" name="Completed" />
-              <Bar dataKey="missed" stackId="a" fill="#E5555A" name="Missed" />
-            </BarChart>
-          </ResponsiveContainer>
+      {myBin ? (
+        <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5 flex items-center gap-5">
+          <div className="bg-white p-2 rounded-sm flex-shrink-0">
+            <QRCodeSVG value={myBin.bin_code} size={100} />
+          </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">Your Bin</p>
+            <p className="font-display text-lg text-white">{myBin.bin_code}</p>
+            <p className="text-sm text-gray-400">{myBin.location} — {myBin.zone_name}</p>
+            <p className="text-sm text-gray-400 mt-1">
+              {myBin.last_collected_at
+                ? `Last collected: ${new Date(myBin.last_collected_at).toLocaleString()}`
+                : "Not collected yet"}
+            </p>
+            <p className="text-xs text-gray-500 mt-1">
+              Show this QR code to your collector at pickup — scanning it marks your collection done here and on the admin dashboard.
+            </p>
+          </div>
         </div>
+      ) : (
+        !loading && (
+          <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5 text-sm text-gray-400">
+            No bin is linked to your account yet — contact an administrator to get your personal QR code set up.
+          </div>
+        )
+      )}
 
-        {/* Waste composition */}
-        <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5">
-          <h2 className="font-display text-sm uppercase tracking-wider text-gray-300 mb-4">Waste Composition</h2>
-          <ResponsiveContainer width="100%" height={280}>
-            <PieChart>
-              <Pie
-                data={data.waste_composition}
-                dataKey="total_kg"
-                nameKey="waste_type"
-                cx="50%"
-                cy="50%"
-                innerRadius={45}
-                outerRadius={80}
-                paddingAngle={2}
-              >
-                {data.waste_composition.map((entry) => (
-                  <Cell key={entry.waste_type} fill={WASTE_COLORS[entry.waste_type] || "#6B7076"} />
-                ))}
-              </Pie>
-              <Tooltip
-                contentStyle={{ background: "#1C2024", border: "1px solid #343B42", fontSize: 12 }}
-                formatter={(value: any) => `${Number(value).toLocaleString()} kg`}
-              />
-              <Legend wrapperStyle={{ fontSize: 10 }} />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      {/* Recent activity */}
       <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5">
-        <h2 className="font-display text-sm uppercase tracking-wider text-gray-300 mb-4">Live Activity Stream</h2>
-        <ul className="space-y-2">
-          {data.recent_activity.map((a, i) => (
-            <li key={i} className="flex items-start gap-3 text-sm border-b border-graphite-700/60 pb-2 last:border-0">
-              <span className="w-1.5 h-1.5 rounded-full bg-gold-500 mt-1.5 shrink-0" />
-              <span className="text-gray-300 flex-1">{a.description}</span>
-              <span className="text-[11px] text-gray-500 font-mono shrink-0">
-                {new Date(a.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">Next Collection</p>
+        <p className="font-display text-2xl text-white">Monday</p>
+        <p className="text-sm text-gray-400">7:00 AM – 9:00 AM</p>
+      </div>
+
+      {recent.length > 0 && (
+        <div>
+          <h2 className="font-display text-lg text-white mb-3">Confirm Recent Collections</h2>
+          <div className="space-y-2">
+            {recent.map((c) => (
+              <div key={c.id} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-mono text-xs text-gold-500">{c.collection_code}</span>
+                  <span className="text-[11px] text-gray-500">
+                    {c.actual_pickup_time ? new Date(c.actual_pickup_time).toLocaleDateString() : "—"}
+                  </span>
+                </div>
+                <p className="text-sm text-gray-200 mb-2">{c.location} · {c.waste_type?.replace("_", " ")}</p>
+                {c.confirmation_id ? (
+                  <p className="text-xs text-status-success">
+                    ✓ You confirmed this {c.rating ? `— rated ${c.rating}/5` : ""}
+                  </p>
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <span className="text-[11px] text-gray-400 mr-1">Confirm & rate:</span>
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => submitConfirmation(c.id, n)}
+                        className="text-lg text-gray-600 hover:text-gold-500 transition-colors"
+                        title={`${n} star${n > 1 ? "s" : ""}`}
+                      >
+                        ★
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <h2 className="font-display text-lg text-white">My Reports</h2>
+        <button
+          onClick={() => setShowForm((s) => !s)}
+          className="text-sm bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold px-3 py-1.5 rounded-sm"
+        >
+          {showForm ? "Cancel" : "+ Report an Issue"}
+        </button>
+      </div>
+
+      {showForm && <ReportForm onSubmitted={() => { setShowForm(false); load(); }} />}
+
+      <div className="space-y-2">
+        {loading ? (
+          <p className="text-gray-500 text-sm">Loading...</p>
+        ) : complaints.length === 0 ? (
+          <p className="text-gray-500 text-sm">No reports submitted yet.</p>
+        ) : (
+          complaints.map((c) => (
+            <div key={c.id} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-mono text-xs text-gold-500">{c.tracking_number}</span>
+                <StatusBadge status={c.status === "SUBMITTED" ? "PENDING" : c.status === "IN_REVIEW" ? "IN_PROGRESS" : c.status} />
+              </div>
+              <p className="text-sm text-gray-200">{c.description}</p>
+              {c.response && (
+                <p className="text-xs text-status-success mt-2 border-l-2 border-status-success/40 pl-2">{c.response}</p>
+              )}
+              <p className="text-[11px] text-gray-500 mt-2">{new Date(c.created_at).toLocaleDateString()}</p>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );
 }
 
-function DashboardSkeleton() {
+function ReportForm({ onSubmitted }: { onSubmitted: () => void }) {
+  const [category, setCategory] = useState(CATEGORIES[0].value);
+  const [location, setLocation] = useState("");
+  const [description, setDescription] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!description.trim()) return;
+    setSubmitting(true);
+    try {
+      await api.post("/complaints", { category, location, description });
+      onSubmitted();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
-    <div className="space-y-6 animate-pulse">
-      <div className="h-8 w-64 bg-graphite-700 rounded-sm" />
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <div key={i} className="h-24 bg-graphite-800 border border-graphite-700 rounded-sm" />
-        ))}
-      </div>
-      <div className="h-72 bg-graphite-800 border border-graphite-700 rounded-sm" />
-    </div>
+    <form onSubmit={submit} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4 space-y-3">
+      <label className="block">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">What's the issue?</span>
+        <select
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+        >
+          {CATEGORIES.map((c) => (
+            <option key={c.value} value={c.value}>{c.label}</option>
+          ))}
+        </select>
+      </label>
+      <label className="block">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Where?</span>
+        <input
+          value={location}
+          onChange={(e) => setLocation(e.target.value)}
+          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+          placeholder="e.g. Estate Housing A, Block 4"
+        />
+      </label>
+      <label className="block">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Details</span>
+        <textarea
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          rows={3}
+          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+        />
+      </label>
+      <button
+        type="submit"
+        disabled={submitting}
+        className="text-sm bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
+      >
+        {submitting ? "Submitting..." : "Submit Report"}
+      </button>
+    </form>
   );
 }

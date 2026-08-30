@@ -1,311 +1,400 @@
-import { useEffect, useState } from "react";
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line,
-} from "recharts";
-import { api } from "../api";
+import { Router } from "express";
+import { pool } from "../db/pool";
+import { authenticate, authorize, AuthedRequest } from "../middleware/auth";
+import { logAudit } from "../utils/audit";
 
-type Tab = "collections" | "waste" | "collectors" | "vehicles" | "incidents" | "environmental";
+const router = Router();
+const MANAGE_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"];
 
-const TABS: { key: Tab; label: string }[] = [
-  { key: "collections", label: "Collections" },
-  { key: "waste", label: "Waste" },
-  { key: "collectors", label: "Collectors" },
-  { key: "vehicles", label: "Vehicles" },
-  { key: "incidents", label: "Incidents" },
-  { key: "environmental", label: "Environmental" },
-];
+// List routes — collectors see only their own, staff see all (optionally filtered by date)
+router.get("/", authenticate, async (req: AuthedRequest, res) => {
+  const { date } = req.query;
+  const clauses: string[] = [];
+  const values: any[] = [];
+  let i = 1;
 
-export default function Reports() {
-  const [tab, setTab] = useState<Tab>("collections");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-  const [data, setData] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  if (req.user!.role === "COLLECTOR") {
+    clauses.push(`r.collector_id = $${i++}`);
+    values.push(req.user!.id);
+  }
+  if (date) {
+    clauses.push(`r.scheduled_date = $${i++}`);
+    values.push(date);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
-  useEffect(() => {
-    setLoading(true);
-    const params: any = {};
-    if (dateFrom) params.date_from = dateFrom;
-    if (dateTo) params.date_to = dateTo;
-    api
-      .get(`/reports/${tab}`, { params })
-      .then((res) => setData(res.data))
-      .finally(() => setLoading(false));
-  }, [tab, dateFrom, dateTo]);
+  const result = await pool.query(
+    `SELECT r.id, r.route_code, r.name, r.collector_id, u.full_name AS collector_name,
+            r.vehicle_id, v.registration_number AS vehicle_reg, r.scheduled_date,
+            r.estimated_distance_km, r.estimated_duration_min, r.status, r.started_at, r.completed_at,
+            (SELECT COUNT(*) FROM route_stops WHERE route_id = r.id)::int AS total_stops,
+            (SELECT COUNT(*) FROM route_stops WHERE route_id = r.id AND status = 'COMPLETED')::int AS completed_stops
+     FROM routes r
+     LEFT JOIN users u ON u.id = r.collector_id
+     LEFT JOIN vehicles v ON v.id = r.vehicle_id
+     ${where}
+     ORDER BY r.scheduled_date DESC, r.id`,
+    values
+  );
+  res.json({ routes: result.rows });
+});
 
-  function exportCsv() {
-    const params = new URLSearchParams({ type: tab });
-    if (dateFrom) params.set("date_from", dateFrom);
-    if (dateTo) params.set("date_to", dateTo);
-    const token = localStorage.getItem("valco_token");
-    const url = `${(api.defaults.baseURL || "")}/reports/export.csv?${params.toString()}`;
-    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-      .then((r) => r.blob())
-      .then((blob) => {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `${tab}_report.csv`;
-        a.click();
-      });
+// Full detail for one route including ordered stops with collection info
+// Driver's view: their assigned vehicle + today's route on that vehicle, if any.
+// Must be registered before GET /:id, or Express will try to parse
+// "my-vehicle-today" as a numeric id and fail.
+router.get("/my-vehicle-today", authenticate, async (req: AuthedRequest, res) => {
+  const vehicle = await pool.query(
+    `SELECT id, registration_number, vehicle_type, status, capacity_kg, fuel_type, mileage_km,
+            insurance_expiry, roadworthy_expiry, maintenance_due, current_lat, current_lng,
+            speed_kmh, trip_distance_km, last_gps_update
+     FROM vehicles WHERE driver_id = $1 LIMIT 1`,
+    [req.user!.id]
+  );
+  if (!vehicle.rows[0]) return res.json({ vehicle: null, route: null, stops: [] });
+
+  const today = new Date().toISOString().slice(0, 10);
+  const route = await pool.query(
+    `SELECT r.*, u.full_name AS collector_name
+     FROM routes r LEFT JOIN users u ON u.id = r.collector_id
+     WHERE r.vehicle_id = $1 AND r.scheduled_date = $2 LIMIT 1`,
+    [vehicle.rows[0].id, today]
+  );
+
+  let stops: any[] = [];
+  if (route.rows[0]) {
+    const stopsRes = await pool.query(
+      `SELECT rs.id, rs.stop_order, rs.status, c.collection_code, c.location, c.waste_type, c.scheduled_time, z.name AS zone_name
+       FROM route_stops rs
+       LEFT JOIN collections c ON c.id = rs.collection_id
+       LEFT JOIN zones z ON z.id = c.zone_id
+       WHERE rs.route_id = $1 ORDER BY rs.stop_order`,
+      [route.rows[0].id]
+    );
+    stops = stopsRes.rows;
   }
 
-  return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Analytics</p>
-          <h1 className="font-display text-2xl font-semibold text-white">Reporting &amp; Analytics</h1>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <input
-            type="date"
-            value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
-            className="bg-graphite-800 border border-graphite-600 rounded-sm px-2 py-1.5 text-xs text-white"
-          />
-          <span className="text-gray-500 text-xs">to</span>
-          <input
-            type="date"
-            value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
-            className="bg-graphite-800 border border-graphite-600 rounded-sm px-2 py-1.5 text-xs text-white"
-          />
-          <button
-            onClick={exportCsv}
-            className="text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-200 px-3 py-1.5 rounded-sm"
-          >
-            Export CSV
-          </button>
-          <button
-            onClick={() => window.print()}
-            className="text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-200 px-3 py-1.5 rounded-sm"
-          >
-            Print / Save as PDF
-          </button>
-        </div>
-      </div>
+  res.json({ vehicle: vehicle.rows[0], route: route.rows[0] || null, stops });
+});
 
-      <div className="flex gap-1 border-b border-graphite-700">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-4 py-2 text-sm border-b-2 transition-colors ${
-              tab === t.key ? "border-gold-500 text-white" : "border-transparent text-gray-400 hover:text-gray-200"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+// A collector's day, derived automatically from their FIXED zone
+// assignment (users.zone_id) — no admin has to build a route by hand.
+// If they don't have a route yet for today, one is created on the fly
+// covering every bin in their zone. Reassigning a collector to a
+// different zone (admin edits users.zone_id) takes effect the next time
+// this runs — it never touches a route that already exists for today, so
+// mid-day reshuffles don't retroactively rewrite a route in progress.
+router.get("/my-day", authenticate, async (req: AuthedRequest, res) => {
+  if (req.user!.role !== "COLLECTOR") {
+    return res.status(403).json({ error: "Only collectors have a day route." });
+  }
 
-      {loading ? (
-        <p className="text-gray-500 text-sm">Loading report...</p>
-      ) : (
-        <>
-          {tab === "collections" && data && <CollectionsReport data={data} />}
-          {tab === "waste" && data && <WasteReport data={data} />}
-          {tab === "collectors" && data && <CollectorsReport data={data} />}
-          {tab === "vehicles" && data && <VehiclesReport data={data} />}
-          {tab === "incidents" && data && <IncidentsReport data={data} />}
-          {tab === "environmental" && data && <EnvironmentalReport data={data} />}
-        </>
-      )}
-    </div>
+  const me = await pool.query("SELECT zone_id FROM users WHERE id = $1", [req.user!.id]);
+  const zoneId = me.rows[0]?.zone_id;
+  if (!zoneId) {
+    return res.json({ route: null, stops: [], message: "You don't have a zone assigned yet — ask an administrator." });
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  let route = await pool.query(
+    "SELECT * FROM routes WHERE collector_id = $1 AND scheduled_date = $2",
+    [req.user!.id, today]
   );
-}
 
-function ReportCard({ children }: { children: React.ReactNode }) {
-  return <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5">{children}</div>;
-}
-function Stat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div>
-      <p className="text-[11px] uppercase tracking-wider text-gray-400">{label}</p>
-      <p className="font-display text-2xl text-white">{value}</p>
-    </div>
-  );
-}
+  if (!route.rows[0]) {
+    const zone = await pool.query("SELECT name FROM zones WHERE id = $1", [zoneId]);
+    const countRes = await pool.query("SELECT COUNT(*)::int AS n FROM routes");
+    const routeCode = `RT-${today}-${String(countRes.rows[0].n + 1).padStart(3, "0")}`;
 
-function CollectionsReport({ data }: { data: any }) {
-  return (
-    <div className="space-y-5">
-      <ReportCard>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <Stat label="Scheduled" value={data.summary.scheduled} />
-          <Stat label="Completed" value={data.summary.completed} />
-          <Stat label="Missed" value={data.summary.missed} />
-          <Stat label="Efficiency" value={`${data.summary.efficiency_pct}%`} />
-        </div>
-      </ReportCard>
-      <ReportCard>
-        <h3 className="font-display text-sm uppercase tracking-wider text-gray-300 mb-4">Daily Volume</h3>
-        <ResponsiveContainer width="100%" height={260}>
-          <BarChart data={data.daily}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#262B30" />
-            <XAxis dataKey="scheduled_date" stroke="#6B7076" fontSize={10} tickFormatter={(d) => new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric" })} />
-            <YAxis stroke="#6B7076" fontSize={11} />
-            <Tooltip contentStyle={{ background: "#1C2024", border: "1px solid #343B42", fontSize: 12 }} />
-            <Bar dataKey="completed" fill="#3FA34D" name="Completed" />
-            <Bar dataKey="missed" fill="#E5555A" name="Missed" />
-          </BarChart>
-        </ResponsiveContainer>
-      </ReportCard>
-    </div>
-  );
-}
+    const created = await pool.query(
+      `INSERT INTO routes (route_code, name, collector_id, scheduled_date, status, created_by)
+       VALUES ($1, $2, $3, $4, 'PLANNED', $3) RETURNING *`,
+      [routeCode, `${zone.rows[0]?.name || "Zone"} — ${today}`, req.user!.id, today]
+    );
+    route = created;
 
-function WasteReport({ data }: { data: any }) {
-  return (
-    <div className="space-y-5">
-      <ReportCard>
-        <div className="grid grid-cols-2 gap-4">
-          <Stat label="Total Collected" value={`${Math.round(data.total_kg).toLocaleString()} kg`} />
-          <Stat label="Recycling Rate" value={`${data.recycling_rate_pct}%`} />
-        </div>
-      </ReportCard>
-      <ReportCard>
-        <h3 className="font-display text-sm uppercase tracking-wider text-gray-300 mb-4">By Waste Type</h3>
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={data.by_type} layout="vertical" margin={{ left: 20 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#262B30" horizontal={false} />
-            <XAxis type="number" stroke="#6B7076" fontSize={11} />
-            <YAxis dataKey="waste_type" type="category" width={90} stroke="#6B7076" fontSize={11} />
-            <Tooltip contentStyle={{ background: "#1C2024", border: "1px solid #343B42", fontSize: 12 }} formatter={(v: any) => `${Math.round(Number(v)).toLocaleString()} kg`} />
-            <Bar dataKey="total_kg" fill="#C9A24B" />
-          </BarChart>
-        </ResponsiveContainer>
-      </ReportCard>
-      <ReportCard>
-        <h3 className="font-display text-sm uppercase tracking-wider text-gray-300 mb-4">By Zone (Top 10)</h3>
-        <div className="space-y-1.5 max-h-64 overflow-y-auto">
-          {data.by_zone.slice(0, 10).map((z: any) => (
-            <div key={z.zone_name} className="flex justify-between text-sm border-b border-graphite-700/60 py-1.5">
-              <span className="text-gray-300">{z.zone_name}</span>
-              <span className="text-gray-400 font-mono text-xs">{Math.round(z.total_kg).toLocaleString()} kg</span>
-            </div>
-          ))}
-        </div>
-      </ReportCard>
-    </div>
-  );
-}
+    const bins = await pool.query("SELECT id FROM bins WHERE zone_id = $1 ORDER BY id", [zoneId]);
+    let order = 1;
+    for (const bin of bins.rows) {
+      await pool.query(
+        `INSERT INTO route_stops (route_id, bin_id, stop_order, status) VALUES ($1, $2, $3, 'PENDING')`,
+        [route.rows[0].id, bin.id, order++]
+      );
+    }
+  }
 
-function CollectorsReport({ data }: { data: any }) {
-  return (
-    <ReportCard>
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-[11px] uppercase tracking-wider text-gray-400 border-b border-graphite-700">
-            <th className="py-2">Collector</th>
-            <th className="py-2">Completed</th>
-            <th className="py-2">Missed</th>
-            <th className="py-2">Total Assigned</th>
-            <th className="py-2">Punctuality</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.collectors.map((c: any) => (
-            <tr key={c.id} className="border-b border-graphite-700/60 last:border-0">
-              <td className="py-2 text-gray-200">{c.full_name}</td>
-              <td className="py-2 text-status-success">{c.completed}</td>
-              <td className="py-2 text-status-critical">{c.missed}</td>
-              <td className="py-2 text-gray-400">{c.total_assigned}</td>
-              <td className="py-2 text-gray-300">{c.punctuality_pct !== null ? `${c.punctuality_pct}%` : "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </ReportCard>
+  const stopsRes = await pool.query(
+    `SELECT rs.id, rs.stop_order, rs.status, rs.arrived_at, rs.scan_verified,
+            b.id AS bin_id, b.bin_code, b.location, b.waste_type, b.resident_id
+     FROM route_stops rs
+     LEFT JOIN bins b ON b.id = rs.bin_id
+     WHERE rs.route_id = $1 ORDER BY rs.stop_order`,
+    [route.rows[0].id]
   );
-}
 
-function VehiclesReport({ data }: { data: any }) {
-  return (
-    <ReportCard>
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-[11px] uppercase tracking-wider text-gray-400 border-b border-graphite-700">
-            <th className="py-2">Vehicle</th>
-            <th className="py-2">Type</th>
-            <th className="py-2">Trips</th>
-            <th className="py-2">Completed</th>
-            <th className="py-2">Mileage</th>
-            <th className="py-2">Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.vehicles.map((v: any) => (
-            <tr key={v.id} className="border-b border-graphite-700/60 last:border-0">
-              <td className="py-2 font-mono text-xs text-gold-500">{v.registration_number}</td>
-              <td className="py-2 text-gray-300">{v.vehicle_type}</td>
-              <td className="py-2 text-gray-300">{v.trips}</td>
-              <td className="py-2 text-status-success">{v.completed_trips}</td>
-              <td className="py-2 text-gray-400">{v.mileage_km ? `${v.mileage_km} km` : "—"}</td>
-              <td className="py-2 text-gray-300">{v.status?.replace("_", " ")}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </ReportCard>
-  );
-}
+  res.json({ route: route.rows[0], stops: stopsRes.rows });
+});
 
-function IncidentsReport({ data }: { data: any }) {
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-      <ReportCard>
-        <h3 className="font-display text-sm uppercase tracking-wider text-gray-300 mb-4">By Category</h3>
-        <ResponsiveContainer width="100%" height={260}>
-          <BarChart data={data.by_category} layout="vertical" margin={{ left: 20 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#262B30" horizontal={false} />
-            <XAxis type="number" stroke="#6B7076" fontSize={11} />
-            <YAxis dataKey="category" type="category" width={110} stroke="#6B7076" fontSize={10} />
-            <Tooltip contentStyle={{ background: "#1C2024", border: "1px solid #343B42", fontSize: 12 }} />
-            <Bar dataKey="count" fill="#5A9BD8" />
-          </BarChart>
-        </ResponsiveContainer>
-      </ReportCard>
-      <ReportCard>
-        <h3 className="font-display text-sm uppercase tracking-wider text-gray-300 mb-4">By Severity</h3>
-        <div className="space-y-2">
-          {data.by_severity.map((s: any) => (
-            <div key={s.severity} className="flex justify-between text-sm">
-              <span className="text-gray-300">{s.severity}</span>
-              <span className="font-mono text-gray-400">{s.count}</span>
-            </div>
-          ))}
-        </div>
-        <p className="text-xs text-gray-400 mt-4 pt-4 border-t border-graphite-700">
-          Avg. resolution time: {data.avg_resolution_hours ? `${data.avg_resolution_hours} hrs` : "No resolved incidents yet"}
-        </p>
-      </ReportCard>
-    </div>
+router.get("/:id", authenticate, async (req: AuthedRequest, res) => {
+  const routeRes = await pool.query(
+    `SELECT r.*, u.full_name AS collector_name, v.registration_number AS vehicle_reg
+     FROM routes r LEFT JOIN users u ON u.id = r.collector_id LEFT JOIN vehicles v ON v.id = r.vehicle_id
+     WHERE r.id = $1`,
+    [req.params.id]
   );
-}
+  if (!routeRes.rows[0]) return res.status(404).json({ error: "Route not found." });
 
-function EnvironmentalReport({ data }: { data: any }) {
-  return (
-    <div className="space-y-5">
-      <ReportCard>
-        <div className="grid grid-cols-3 gap-4">
-          <Stat label="Total Waste" value={`${Math.round(data.total_kg).toLocaleString()} kg`} />
-          <Stat label="Recycling Rate" value={`${data.recycling_rate_pct}%`} />
-          <Stat label="Landfill Diversion" value={`${data.landfill_diversion_rate_pct}%`} />
-        </div>
-      </ReportCard>
-      <ReportCard>
-        <h3 className="font-display text-sm uppercase tracking-wider text-gray-300 mb-4">Generation Trend</h3>
-        <ResponsiveContainer width="100%" height={240}>
-          <LineChart data={data.generation_trend}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#262B30" />
-            <XAxis dataKey="month" stroke="#6B7076" fontSize={11} />
-            <YAxis stroke="#6B7076" fontSize={11} />
-            <Tooltip contentStyle={{ background: "#1C2024", border: "1px solid #343B42", fontSize: 12 }} />
-            <Line type="monotone" dataKey="total_kg" stroke="#C9A24B" strokeWidth={2} dot={false} />
-          </LineChart>
-        </ResponsiveContainer>
-      </ReportCard>
-    </div>
+  if (req.user!.role === "COLLECTOR" && routeRes.rows[0].collector_id !== req.user!.id) {
+    return res.status(403).json({ error: "You can only view your own routes." });
+  }
+
+  const stopsRes = await pool.query(
+    `SELECT rs.id, rs.stop_order, rs.status, rs.arrived_at, rs.synced, rs.scan_verified,
+            COALESCE(c.collection_code, b.bin_code) AS collection_code,
+            COALESCE(c.location, b.location) AS location,
+            COALESCE(c.waste_type, b.waste_type) AS waste_type,
+            c.priority, c.scheduled_time, c.status AS collection_status,
+            COALESCE(z.name, zb.name) AS zone_name
+     FROM route_stops rs
+     LEFT JOIN collections c ON c.id = rs.collection_id
+     LEFT JOIN zones z ON z.id = c.zone_id
+     LEFT JOIN bins b ON b.id = rs.bin_id
+     LEFT JOIN zones zb ON zb.id = b.zone_id
+     WHERE rs.route_id = $1
+     ORDER BY rs.stop_order`,
+    [req.params.id]
   );
-}
+
+  res.json({ route: routeRes.rows[0], stops: stopsRes.rows });
+});
+
+router.post("/", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
+  const { name, collector_id, vehicle_id, scheduled_date, collection_ids, estimated_distance_km, estimated_duration_min } = req.body || {};
+  if (!name || !scheduled_date || !Array.isArray(collection_ids) || collection_ids.length === 0) {
+    return res.status(400).json({ error: "name, scheduled_date, and at least one collection_id are required." });
+  }
+
+  const countRes = await pool.query("SELECT COUNT(*)::int AS n FROM routes");
+  const code = `RT-2026-${String(countRes.rows[0].n + 1).padStart(3, "0")}`;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const routeRes = await client.query(
+      `INSERT INTO routes (route_code, name, collector_id, vehicle_id, scheduled_date, estimated_distance_km, estimated_duration_min, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [code, name, collector_id || null, vehicle_id || null, scheduled_date, estimated_distance_km || null, estimated_duration_min || null, req.user!.id]
+    );
+    const routeId = routeRes.rows[0].id;
+
+    for (let idx = 0; idx < collection_ids.length; idx++) {
+      await client.query(
+        `INSERT INTO route_stops (route_id, collection_id, stop_order) VALUES ($1,$2,$3)`,
+        [routeId, collection_ids[idx], idx + 1]
+      );
+    }
+    await client.query("COMMIT");
+
+    await logAudit({
+      userId: req.user!.id,
+      action: "CREATE",
+      recordType: "route",
+      recordId: routeId,
+      description: `${req.user!.fullName} (${req.user!.role}) created route ${code} with ${collection_ids.length} stops.`,
+      ip: req.ip,
+    });
+
+    res.status(201).json({ route: routeRes.rows[0] });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Couldn't create route." });
+  } finally {
+    client.release();
+  }
+});
+
+router.patch("/:id/start", authenticate, async (req: AuthedRequest, res) => {
+  const route = (await pool.query("SELECT * FROM routes WHERE id = $1", [req.params.id])).rows[0];
+  if (!route) return res.status(404).json({ error: "Route not found." });
+  if (req.user!.role === "COLLECTOR" && route.collector_id !== req.user!.id) {
+    return res.status(403).json({ error: "You can only start your own routes." });
+  }
+  const result = await pool.query(
+    `UPDATE routes SET status = 'IN_PROGRESS', started_at = now() WHERE id = $1 RETURNING *`,
+    [req.params.id]
+  );
+  res.json({ route: result.rows[0] });
+});
+
+// Reorder stops (drag-and-drop on the supervisor side)
+router.patch("/:id/reorder", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
+  const { stop_ids } = req.body || {}; // array of route_stop ids in new order
+  if (!Array.isArray(stop_ids)) return res.status(400).json({ error: "stop_ids array required." });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (let idx = 0; idx < stop_ids.length; idx++) {
+      await client.query(`UPDATE route_stops SET stop_order = $1 WHERE id = $2 AND route_id = $3`, [idx + 1, stop_ids[idx], req.params.id]);
+    }
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ error: "Couldn't reorder stops." });
+  } finally {
+    client.release();
+  }
+});
+
+// Single-stop update — used for ONLINE completions. If the stop has a bin_id
+// assigned, scanned_code must match that bin's bin_code for scan_verified to
+// be true — but completion is still allowed without a match (e.g. a bin was
+// physically swapped), it just won't show as QR-verified in the audit trail.
+router.patch("/stops/:stopId", authenticate, async (req: AuthedRequest, res) => {
+  const { status, arrived_at, scanned_code } = req.body || {};
+
+  if (req.user!.role === "COLLECTOR") {
+    const owns = await pool.query(
+      `SELECT rs.id FROM route_stops rs JOIN routes r ON r.id = rs.route_id
+       WHERE rs.id = $1 AND r.collector_id = $2`,
+      [req.params.stopId, req.user!.id]
+    );
+    if (!owns.rows[0]) return res.status(403).json({ error: "You can only update your own stops." });
+  }
+
+  let scanVerified = false;
+  if (scanned_code) {
+    const stopBin = await pool.query(
+      `SELECT b.bin_code FROM route_stops rs JOIN bins b ON b.id = rs.bin_id WHERE rs.id = $1`,
+      [req.params.stopId]
+    );
+    scanVerified = !!stopBin.rows[0] && stopBin.rows[0].bin_code === scanned_code;
+  }
+
+  const result = await pool.query(
+    `UPDATE route_stops
+     SET status = COALESCE($1, status), arrived_at = COALESCE($2, arrived_at),
+         scanned_code = COALESCE($3, scanned_code), scan_verified = scan_verified OR $4,
+         synced = true
+     WHERE id = $5 RETURNING *`,
+    [status, arrived_at, scanned_code || null, scanVerified, req.params.stopId]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: "Stop not found." });
+
+  // This is the actual QR-scan completion path (MyDay.tsx) — separate from
+  // the manual "Change status" flow on the Collections page, which already
+  // had its own notification logic. Without this, scanning a bin's QR code
+  // updated route_stops but nothing else ever found out about it: not the
+  // bin's own fill/last-collected status, not the resident it belongs to,
+  // not admins.
+  if (status === "COMPLETED" && result.rows[0].bin_id) {
+    const binRes = await pool.query(
+      `UPDATE bins SET last_collected_at = now(), fill_level_pct = 0, updated_at = now()
+       WHERE id = $1 RETURNING id, bin_code, location, resident_id`,
+      [result.rows[0].bin_id]
+    );
+    const bin = binRes.rows[0];
+
+    if (bin) {
+      const staff = await pool.query(
+        "SELECT id FROM users WHERE role IN ('SUPER_ADMIN','ICT_ADMIN','WASTE_MANAGER','SUPERVISOR') AND is_active = true"
+      );
+      const recipientIds = [...staff.rows.map((r) => r.id), ...(bin.resident_id ? [bin.resident_id] : [])];
+
+      for (const uid of recipientIds) {
+        await pool.query(
+          `INSERT INTO notifications (user_id, type, title, body, record_type, record_id)
+           VALUES ($1, 'collection_completed', 'Collection completed',
+                   $2, 'bin', $3)`,
+          [uid, `${bin.bin_code} at ${bin.location} was just collected${scanVerified ? " (QR verified)" : ""}.`, bin.id]
+        );
+      }
+    }
+  }
+
+  // check whether the whole route is now complete
+  const route = await pool.query(
+    `SELECT r.id, COUNT(rs.*)::int AS total, COUNT(*) FILTER (WHERE rs.status = 'COMPLETED')::int AS done
+     FROM routes r JOIN route_stops rs ON rs.route_id = r.id WHERE r.id = $1 GROUP BY r.id`,
+    [result.rows[0].route_id]
+  );
+  if (route.rows[0] && route.rows[0].total === route.rows[0].done) {
+    await pool.query(`UPDATE routes SET status = 'COMPLETED', completed_at = now() WHERE id = $1`, [route.rows[0].id]);
+  }
+
+  res.json({ stop: result.rows[0], scan_verified: scanVerified });
+});
+
+// Supervisors assign which physical bin a stop corresponds to, so the
+// collector's QR scan has something concrete to verify against.
+router.patch("/stops/:stopId/bin", authenticate, authorize("SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"), async (req: AuthedRequest, res) => {
+  const { bin_id } = req.body || {};
+  const result = await pool.query(`UPDATE route_stops SET bin_id = $1 WHERE id = $2 RETURNING *`, [bin_id || null, req.params.stopId]);
+  if (!result.rows[0]) return res.status(404).json({ error: "Stop not found." });
+  res.json({ stop: result.rows[0] });
+});
+
+// OFFLINE SYNC — the mobile collector app queues completed stops locally
+// while offline (with a client-generated timestamp) and replays them here
+// in one batch once connectivity returns. Each item is applied independently
+// so a partial batch failure doesn't block the rest.
+router.post("/sync", authenticate, async (req: AuthedRequest, res) => {
+  const { pending } = req.body || {}; // [{ stop_id, status, arrived_at_client }]
+  if (!Array.isArray(pending)) return res.status(400).json({ error: "pending array required." });
+
+  const results: any[] = [];
+  for (const item of pending) {
+    try {
+      // Ownership check: collectors may only sync stops on their own routes
+      if (req.user!.role === "COLLECTOR") {
+        const owns = await pool.query(
+          `SELECT rs.id FROM route_stops rs JOIN routes r ON r.id = rs.route_id
+           WHERE rs.id = $1 AND r.collector_id = $2`,
+          [item.stop_id, req.user!.id]
+        );
+        if (!owns.rows[0]) {
+          results.push({ stop_id: item.stop_id, ok: false, error: "Not your stop." });
+          continue;
+        }
+      }
+
+      let scanVerified = false;
+      if (item.scanned_code) {
+        const stopBin = await pool.query(
+          `SELECT b.bin_code FROM route_stops rs JOIN bins b ON b.id = rs.bin_id WHERE rs.id = $1`,
+          [item.stop_id]
+        );
+        scanVerified = !!stopBin.rows[0] && stopBin.rows[0].bin_code === item.scanned_code;
+      }
+
+      const result = await pool.query(
+        `UPDATE route_stops
+         SET status = $1, arrived_at = $2, scanned_code = COALESCE($3, scanned_code),
+             scan_verified = scan_verified OR $4, synced = true
+         WHERE id = $5 RETURNING id, route_id, status`,
+        [item.status, item.arrived_at_client, item.scanned_code || null, scanVerified, item.stop_id]
+      );
+      if (result.rows[0]) {
+        const route = await pool.query(
+          `SELECT r.id, COUNT(rs.*)::int AS total, COUNT(*) FILTER (WHERE rs.status = 'COMPLETED')::int AS done
+           FROM routes r JOIN route_stops rs ON rs.route_id = r.id WHERE r.id = $1 GROUP BY r.id`,
+          [result.rows[0].route_id]
+        );
+        if (route.rows[0] && route.rows[0].total === route.rows[0].done) {
+          await pool.query(`UPDATE routes SET status = 'COMPLETED', completed_at = now() WHERE id = $1`, [route.rows[0].id]);
+        }
+        results.push({ stop_id: item.stop_id, ok: true });
+      } else {
+        results.push({ stop_id: item.stop_id, ok: false, error: "Stop not found." });
+      }
+    } catch (err) {
+      results.push({ stop_id: item.stop_id, ok: false, error: "Sync failed for this stop." });
+    }
+  }
+
+  res.json({ results });
+});
+
+export default router;

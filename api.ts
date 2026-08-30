@@ -1,39 +1,16 @@
-/** @type {import('tailwindcss').Config} */
-export default {
-  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
-  theme: {
-    extend: {
-      colors: {
-        graphite: {
-          950: "#0F1113",
-          900: "#15181B",
-          800: "#1C2024",
-          700: "#262B30",
-          600: "#343B42",
-          500: "#4A535C",
-        },
-        gold: {
-          400: "#E4C069",
-          500: "#C9A24B",
-          600: "#A8813A",
-        },
-        status: {
-          success: "#3FA34D",
-          successBg: "#16261A",
-          warning: "#E8A93B",
-          warningBg: "#2A2114",
-          critical: "#E5555A",
-          criticalBg: "#2B1616",
-          info: "#5A9BD8",
-          infoBg: "#141F2A",
-        },
-      },
-      fontFamily: {
-        display: ["'Barlow Condensed'", "sans-serif"],
-        body: ["'Inter'", "sans-serif"],
-        mono: ["'JetBrains Mono'", "monospace"],
-      },
-    },
-  },
-  plugins: [],
+const STYLES: Record<string, string> = {
+  COMPLETED: "bg-status-successBg text-status-success border-status-success/30",
+  PENDING: "bg-status-infoBg text-status-info border-status-info/30",
+  IN_PROGRESS: "bg-status-warningBg text-status-warning border-status-warning/30",
+  MISSED: "bg-status-criticalBg text-status-critical border-status-critical/30",
+  CANCELLED: "bg-graphite-700 text-gray-400 border-graphite-600",
+};
+
+export default function StatusBadge({ status }: { status: string }) {
+  const style = STYLES[status] || STYLES.CANCELLED;
+  return (
+    <span className={`inline-block px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide rounded-sm border ${style}`}>
+      {status.replace("_", " ")}
+    </span>
+  );
 }

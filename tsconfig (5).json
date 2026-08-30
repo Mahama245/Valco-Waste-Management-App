@@ -1,0 +1,147 @@
+import { Router } from "express";
+import bcrypt from "bcryptjs";
+import rateLimit from "express-rate-limit";
+import { pool } from "../db/pool";
+import { signToken, authenticate, AuthedRequest } from "../middleware/auth";
+import { logAudit } from "../utils/audit";
+
+const router = Router();
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: "Too many login attempts. Please try again in 15 minutes." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post("/login", loginLimiter, async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: "Username and password are required." });
+    }
+    const clean = String(username).trim().toLowerCase();
+
+    const result = await pool.query(
+      "SELECT id, full_name, username, password_hash, role, is_active FROM users WHERE username = $1",
+      [clean]
+    );
+    const user = result.rows[0];
+    if (!user || !user.is_active || !bcrypt.compareSync(password, user.password_hash)) {
+      return res.status(401).json({ error: "Invalid username or password." });
+    }
+
+    await pool.query("UPDATE users SET last_login = now() WHERE id = $1", [user.id]);
+
+    const token = signToken({ id: user.id, username: user.username, role: user.role, fullName: user.full_name });
+
+    await logAudit({
+      userId: user.id,
+      action: "LOGIN",
+      recordType: "user",
+      recordId: user.id,
+      description: `${user.full_name} (${user.role}) logged in.`,
+      ip: req.ip,
+    });
+
+    res.json({
+      token,
+      user: { id: user.id, username: user.username, fullName: user.full_name, role: user.role },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error during login." });
+  }
+});
+
+router.get("/me", authenticate, async (req: AuthedRequest, res) => {
+  res.json({ user: req.user });
+});
+
+// Public self-registration — residents only. Staff accounts (collectors,
+// supervisors, admins, etc.) are still created by an administrator via
+// /api/users, never through this open endpoint.
+router.post("/register", async (req, res) => {
+  try {
+    const { full_name, username, password, email, zone_id } = req.body || {};
+    if (!full_name || !username || !password) {
+      return res.status(400).json({ error: "full_name, username, and password are required." });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters." });
+    }
+    const clean = String(username).trim().toLowerCase();
+
+    const existing = await pool.query("SELECT id FROM users WHERE username = $1", [clean]);
+    if (existing.rows[0]) return res.status(409).json({ error: "That username is already taken." });
+
+    const hash = bcrypt.hashSync(password, 10);
+    const result = await pool.query(
+      `INSERT INTO users (full_name, username, email, password_hash, role, department, zone_id)
+       VALUES ($1, $2, $3, $4, 'RESIDENT', 'Resident', $5)
+       RETURNING id, full_name, username, role`,
+      [full_name, clean, email || null, hash, zone_id || null]
+    );
+
+    const user = result.rows[0];
+    const token = signToken({ id: user.id, username: user.username, role: user.role, fullName: user.full_name });
+
+    // Give every resident who registered with a zone their own bin right
+    // away — this bin's code IS their personal QR code, printable from
+    // the existing Print QR Codes page. Residents created via the admin
+    // portal don't collect a zone at creation time, so they won't get one
+    // automatically here — an admin links a bin to them afterward via the
+    // Bins page instead. Never lets a bin-creation hiccup break signup
+    // itself, hence the separate try/catch.
+    if (zone_id) {
+      try {
+        const countRes = await pool.query("SELECT COUNT(*)::int AS n FROM bins");
+        const binCode = `WM-BIN-${String(10000 + countRes.rows[0].n + 1)}`;
+        await pool.query(
+          `INSERT INTO bins (bin_code, zone_id, location, resident_id)
+           VALUES ($1, $2, $3, $4)`,
+          [binCode, zone_id, `${full_name}'s residence`, user.id]
+        );
+      } catch (binErr) {
+        console.error("Failed to auto-create resident bin:", binErr);
+      }
+    }
+
+    await logAudit({
+      userId: user.id,
+      action: "CREATE",
+      recordType: "user",
+      recordId: user.id,
+      description: `${full_name} self-registered as a Resident.`,
+      ip: req.ip,
+    });
+
+    res.status(201).json({
+      token,
+      user: { id: user.id, username: user.username, fullName: user.full_name, role: user.role },
+    });
+  } catch (err: any) {
+    // The pre-check above only looks at username — it never checked email,
+    // so a duplicate email was hitting the database's own unique
+    // constraint and falling through to the generic 500 below instead of
+    // a proper, honest error message.
+    if (err.code === "23505") {
+      // err.detail from Postgres looks like: 'Key (email)=(foo@bar.com) already exists.'
+      // Logging it (server-side only, never sent to the client) tells us
+      // exactly which column and which value actually collided, instead
+      // of guessing.
+      console.error("REGISTER duplicate-key detail:", err.detail, "| constraint:", err.constraint);
+      const field = err.constraint?.includes("email")
+        ? "email"
+        : err.constraint?.includes("username")
+        ? "username"
+        : "username or email";
+      return res.status(409).json({ error: `That ${field} is already registered.` });
+    }
+    console.error(err);
+    res.status(500).json({ error: "Server error during registration." });
+  }
+});
+
+export default router;

@@ -1,78 +1,73 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../AuthContext";
-import StatusBadge from "../components/StatusBadge";
 
-interface Collection {
+interface AuditRow {
   id: number;
-  collection_code: string;
-  zone_name: string;
-  location: string;
-  scheduled_date: string;
-  scheduled_time: string;
-  collector_name: string | null;
-  vehicle_reg: string | null;
-  waste_type: string;
-  priority: string;
-  status: string;
-  quantity_collected_kg: string | null;
-  missed_reason: string | null;
+  action: string;
+  record_type: string;
+  record_id: number | null;
+  description: string;
+  created_at: string;
+  actor_name: string | null;
+  actor_role: string | null;
 }
 
-const STATUS_OPTIONS = ["PENDING", "IN_PROGRESS", "COMPLETED", "MISSED", "CANCELLED"];
-const CAN_MANAGE_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "COLLECTOR"];
+const ACTION_COLORS: Record<string, string> = {
+  CREATE: "text-status-success",
+  UPDATE: "text-status-warning",
+  DELETE: "text-status-critical",
+  LOGIN: "text-status-info",
+};
 
-export default function Collections() {
+export default function AuditLog() {
   const { user } = useAuth();
-  const [collections, setCollections] = useState<Collection[]>([]);
-  const [statusFilter, setStatusFilter] = useState("");
+  const [logs, setLogs] = useState<AuditRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [updatingId, setUpdatingId] = useState<number | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const canDelete = user?.role === "SUPER_ADMIN";
 
-  const canManage = user && CAN_MANAGE_ROLES.includes(user.role);
-
-  const load = useCallback(() => {
+  function load() {
     setLoading(true);
     api
-      .get("/collections", { params: statusFilter ? { status: statusFilter } : {} })
-      .then((res) => setCollections(res.data.collections))
-      .catch(() => setError("Couldn't load collections."))
+      .get("/audit-logs")
+      .then((res) => setLogs(res.data.audit_logs))
+      .catch(() => setError("Couldn't load the audit log."))
       .finally(() => setLoading(false));
-  }, [statusFilter]);
+  }
 
   useEffect(() => {
-    load();
-  }, [load]);
+    load(); // initial load
+    // Poll every 5 seconds for a live view. This page is only reachable by
+    // SUPER_ADMIN / ICT_ADMIN / WASTE_MANAGER — the backend route
+    // (server/src/routes/audit.ts) already enforces that on every request,
+    // so polling doesn't open this up to anyone new; it just refreshes
+    // what an admin could already see.
+    const interval = setInterval(load, 5000);
+    return () => clearInterval(interval); // stop polling when the page unmounts
+  }, []);
 
-  async function updateStatus(id: number, status: string) {
-    const body: any = { status };
-
-    if (status === "COMPLETED") {
-      const input = window.prompt("Enter the actual measured weight collected (kg):");
-      if (input === null) return; // cancelled
-      const kg = parseFloat(input);
-      if (isNaN(kg) || kg < 0) {
-        setError("Please enter a valid, non-negative weight in kg.");
-        return;
-      }
-      body.quantity_collected_kg = Math.round(kg * 100) / 100;
-      body.actual_pickup_time = new Date().toISOString();
-    }
-    if (status === "MISSED") {
-      const reason = window.prompt("Reason this collection was missed:");
-      if (reason === null) return; // cancelled
-      body.missed_reason = reason.trim() || "No reason given";
-    }
-
-    setUpdatingId(id);
+  async function deleteEntry(id: number) {
+    if (!confirm("Delete this log entry permanently?")) return;
+    setBusyId(id);
     try {
-      await api.patch(`/collections/${id}/status`, body);
+      await api.delete(`/audit-logs/${id}`);
       load();
-    } catch {
-      setError("Couldn't update collection status.");
     } finally {
-      setUpdatingId(null);
+      setBusyId(null);
+    }
+  }
+
+  async function clearAll() {
+    if (!confirm(`Delete ALL ${logs.length} audit log entries? This can't be undone.`)) return;
+    if (!confirm("Really sure? This wipes the entire compliance history.")) return;
+    setBusyId(-1);
+    try {
+      await api.delete("/audit-logs");
+      load();
+    } finally {
+      setBusyId(null);
     }
   }
 
@@ -80,96 +75,60 @@ export default function Collections() {
     <div className="space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Operations</p>
-          <h1 className="font-display text-2xl font-semibold text-white">Collection Management</h1>
+          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Compliance</p>
+          <h1 className="font-display text-2xl font-semibold text-white">Audit Log</h1>
+          <p className="text-sm text-gray-400 mt-1">
+            A record of actions taken across the platform.
+            {canDelete && " As Super Admin you can delete individual entries or clear the log — each deletion is itself logged."}
+          </p>
         </div>
-
-        <div className="flex items-center gap-2">
-          <label className="text-xs text-gray-400">Filter by status</label>
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="bg-graphite-800 border border-graphite-600 rounded-sm px-3 py-1.5 text-sm text-white"
+        {canDelete && logs.length > 0 && (
+          <button
+            onClick={clearAll}
+            disabled={busyId === -1}
+            className="text-xs text-status-critical border border-status-critical/40 hover:bg-status-criticalBg px-3 py-1.5 rounded-sm disabled:opacity-50"
           >
-            <option value="">All</option>
-            {STATUS_OPTIONS.map((s) => (
-              <option key={s} value={s}>
-                {s.replace("_", " ")}
-              </option>
-            ))}
-          </select>
-        </div>
+            {busyId === -1 ? "Clearing..." : "Clear entire log"}
+          </button>
+        )}
       </div>
 
       {error && <div className="text-status-critical text-sm">{error}</div>}
 
-      <div className="bg-graphite-800 border border-graphite-700 rounded-sm overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-graphite-700 text-left text-[11px] uppercase tracking-wider text-gray-400">
-              <th className="px-4 py-3 font-medium">Code</th>
-              <th className="px-4 py-3 font-medium">Zone</th>
-              <th className="px-4 py-3 font-medium">Scheduled</th>
-              <th className="px-4 py-3 font-medium">Collector</th>
-              <th className="px-4 py-3 font-medium">Vehicle</th>
-              <th className="px-4 py-3 font-medium">Waste Type</th>
-              <th className="px-4 py-3 font-medium">Priority</th>
-              <th className="px-4 py-3 font-medium">Status</th>
-              {canManage && <th className="px-4 py-3 font-medium">Update</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr>
-                <td colSpan={9} className="px-4 py-10 text-center text-gray-500">
-                  Loading collections...
-                </td>
-              </tr>
-            ) : collections.length === 0 ? (
-              <tr>
-                <td colSpan={9} className="px-4 py-10 text-center text-gray-500">
-                  No collections match this filter.
-                </td>
-              </tr>
-            ) : (
-              collections.map((c) => (
-                <tr key={c.id} className="border-b border-graphite-700/60 last:border-0 hover:bg-graphite-700/20">
-                  <td className="px-4 py-2.5 font-mono text-xs text-gold-500">{c.collection_code}</td>
-                  <td className="px-4 py-2.5 text-gray-200">{c.zone_name}</td>
-                  <td className="px-4 py-2.5 text-gray-400 text-xs">
-                    {new Date(c.scheduled_date).toLocaleDateString()} {c.scheduled_time}
-                  </td>
-                  <td className="px-4 py-2.5 text-gray-200">{c.collector_name || "—"}</td>
-                  <td className="px-4 py-2.5 font-mono text-xs text-gray-400">{c.vehicle_reg || "—"}</td>
-                  <td className="px-4 py-2.5 text-gray-300">{c.waste_type.replace("_", " ")}</td>
-                  <td className="px-4 py-2.5 text-gray-300">{c.priority}</td>
-                  <td className="px-4 py-2.5">
-                    <StatusBadge status={c.status} />
-                  </td>
-                  {canManage && (
-                    <td className="px-4 py-2.5">
-                      <select
-                        value=""
-                        disabled={updatingId === c.id}
-                        onChange={(e) => e.target.value && updateStatus(c.id, e.target.value)}
-                        className="bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1 text-xs text-gray-300 disabled:opacity-50"
-                      >
-                        <option value="">
-                          {updatingId === c.id ? "Updating..." : "Change status"}
-                        </option>
-                        {STATUS_OPTIONS.filter((s) => s !== c.status).map((s) => (
-                          <option key={s} value={s}>
-                            {s.replace("_", " ")}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                  )}
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+      <div className="bg-graphite-800 border border-graphite-700 rounded-sm divide-y divide-graphite-700/60">
+        {loading ? (
+          <div className="px-4 py-10 text-center text-gray-500 text-sm">Loading audit log...</div>
+        ) : logs.length === 0 ? (
+          <div className="px-4 py-10 text-center text-gray-500 text-sm">No activity recorded yet.</div>
+        ) : (
+          logs.map((log) => (
+            <div key={log.id} className="flex items-start gap-4 px-4 py-3">
+              <span className={`text-[11px] font-mono uppercase w-16 shrink-0 ${ACTION_COLORS[log.action] || "text-gray-400"}`}>
+                {log.action}
+              </span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-gray-200">{log.description}</p>
+                {log.actor_name && (
+                  <p className="text-[11px] text-gray-500 mt-0.5">
+                    {log.actor_name} · {log.actor_role}
+                  </p>
+                )}
+              </div>
+              <span className="text-[11px] text-gray-500 font-mono shrink-0">
+                {new Date(log.created_at).toLocaleString()}
+              </span>
+              {canDelete && (
+                <button
+                  onClick={() => deleteEntry(log.id)}
+                  disabled={busyId === log.id}
+                  className="text-[11px] text-gray-600 hover:text-status-critical shrink-0 disabled:opacity-50"
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+          ))
+        )}
       </div>
     </div>
   );

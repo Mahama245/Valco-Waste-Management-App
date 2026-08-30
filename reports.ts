@@ -1,146 +1,118 @@
 import { Router } from "express";
 import { pool } from "../db/pool";
-import { authenticate, authorize, AuthedRequest } from "../middleware/auth";
-import { logAudit } from "../utils/audit";
-import { nextCollectionCode } from "../utils/identifiers";
+import { authenticate, authorize } from "../middleware/auth";
 
 const router = Router();
+const REPORT_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR", "MANAGEMENT"];
 
-const MANAGE_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"];
+interface Insight {
+  id: string;
+  title: string;
+  description: string;
+  severity: "info" | "warning" | "critical";
+}
 
-// List collections with filters: status, zone, waste_type, collector, date range
-router.get("/", authenticate, async (req: AuthedRequest, res) => {
-  const { status, zone_id, waste_type, collector_id, date_from, date_to, limit } = req.query;
-  const clauses: string[] = [];
-  const values: any[] = [];
-  let i = 1;
+// All insights here are simple rule-based aggregations over real seeded data —
+// there is no ML/AI model behind this. Each one states the rule it applied so
+// it's auditable, and the UI labels the whole section as recommendations.
+router.get("/", authenticate, authorize(...REPORT_ROLES), async (_req, res) => {
+  const insights: Insight[] = [];
 
-  // Collectors only see their own assignments; residents see nothing here (they use complaints/reports)
-  if (req.user!.role === "COLLECTOR") {
-    clauses.push(`c.collector_id = $${i++}`);
-    values.push(req.user!.id);
-  }
-
-  if (status) { clauses.push(`c.status = $${i++}`); values.push(status); }
-  if (zone_id) { clauses.push(`c.zone_id = $${i++}`); values.push(zone_id); }
-  if (waste_type) { clauses.push(`c.waste_type = $${i++}`); values.push(waste_type); }
-  if (collector_id) { clauses.push(`c.collector_id = $${i++}`); values.push(collector_id); }
-  if (date_from) { clauses.push(`c.scheduled_date >= $${i++}`); values.push(date_from); }
-  if (date_to) { clauses.push(`c.scheduled_date <= $${i++}`); values.push(date_to); }
-
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  const lim = Math.min(parseInt(String(limit || "200"), 10) || 200, 500);
-
-  const result = await pool.query(
-    `SELECT c.id, c.collection_code, c.zone_id, z.name AS zone_name, c.location, c.scheduled_date, c.scheduled_time,
-            c.collector_id, u.full_name AS collector_name, c.vehicle_id, v.registration_number AS vehicle_reg,
-            c.waste_type, c.priority, c.status, c.actual_pickup_time, c.quantity_collected_kg, c.missed_reason,
-            c.created_at
-     FROM collections c
-     LEFT JOIN zones z ON z.id = c.zone_id
-     LEFT JOIN users u ON u.id = c.collector_id
-     LEFT JOIN vehicles v ON v.id = c.vehicle_id
-     ${where}
-     ORDER BY c.scheduled_date DESC, c.id DESC
-     LIMIT ${lim}`,
-    values
+  // Rule 1: zones with a missed-collection rate above 20% (min 3 scheduled, so small samples don't skew this)
+  const missedZones = await pool.query(
+    `SELECT z.name, COUNT(*)::int AS total, COUNT(*) FILTER (WHERE c.status='MISSED')::int AS missed
+     FROM collections c JOIN zones z ON z.id = c.zone_id
+     GROUP BY z.name HAVING COUNT(*) >= 3
+     ORDER BY (COUNT(*) FILTER (WHERE c.status='MISSED')::float / COUNT(*)) DESC LIMIT 3`
   );
-  res.json({ collections: result.rows });
-});
-
-router.get("/:id", authenticate, async (req, res) => {
-  const result = await pool.query(
-    `SELECT c.*, z.name AS zone_name, u.full_name AS collector_name, v.registration_number AS vehicle_reg
-     FROM collections c
-     LEFT JOIN zones z ON z.id = c.zone_id
-     LEFT JOIN users u ON u.id = c.collector_id
-     LEFT JOIN vehicles v ON v.id = c.vehicle_id
-     WHERE c.id = $1`,
-    [req.params.id]
-  );
-  if (!result.rows[0]) return res.status(404).json({ error: "Collection not found." });
-  res.json({ collection: result.rows[0] });
-});
-
-router.post("/", authenticate, authorize(...MANAGE_ROLES), async (req: AuthedRequest, res) => {
-  const { zone_id, location, scheduled_date, scheduled_time, collector_id, vehicle_id, waste_type, priority } = req.body || {};
-  if (!zone_id || !location || !scheduled_date) {
-    return res.status(400).json({ error: "zone_id, location, and scheduled_date are required." });
-  }
-
-  const code = await nextCollectionCode();
-
-  const result = await pool.query(
-    `INSERT INTO collections (collection_code, zone_id, location, scheduled_date, scheduled_time, collector_id, vehicle_id, waste_type, priority, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,'GENERAL')::waste_type,COALESCE($9,'NORMAL')::collection_priority,$10)
-     RETURNING *`,
-    [code, zone_id, location, scheduled_date, scheduled_time, collector_id, vehicle_id, waste_type, priority, req.user!.id]
-  );
-
-  await logAudit({
-    userId: req.user!.id,
-    action: "CREATE",
-    recordType: "collection",
-    recordId: result.rows[0].id,
-    description: `${req.user!.fullName} (${req.user!.role}) created collection ${code}.`,
-    newValue: result.rows[0],
-    ip: req.ip,
-  });
-
-  res.status(201).json({ collection: result.rows[0] });
-});
-
-// Update status: complete / miss / cancel / reschedule / assign
-router.patch("/:id/status", authenticate, authorize(...MANAGE_ROLES, "COLLECTOR"), async (req: AuthedRequest, res) => {
-  const { status, quantity_collected_kg, missed_reason, actual_pickup_time } = req.body || {};
-  const allowed = ["PENDING", "IN_PROGRESS", "COMPLETED", "MISSED", "CANCELLED"];
-  if (!allowed.includes(status)) return res.status(400).json({ error: "Invalid status." });
-
-  if (quantity_collected_kg !== undefined && quantity_collected_kg !== null) {
-    const kg = Number(quantity_collected_kg);
-    if (isNaN(kg) || kg < 0 || kg > 50000) {
-      return res.status(400).json({ error: "quantity_collected_kg must be a number between 0 and 50000." });
+  for (const row of missedZones.rows) {
+    const rate = Math.round((row.missed / row.total) * 100);
+    if (rate >= 15) {
+      insights.push({
+        id: `missed-zone-${row.name}`,
+        title: `${row.name} has a high missed-collection rate`,
+        description: `${row.missed} of ${row.total} scheduled collections were missed (${rate}%) in the seeded data. Consider reviewing route assignment or access conditions in this zone.`,
+        severity: rate >= 30 ? "critical" : "warning",
+      });
     }
   }
-  if (status === "COMPLETED" && (quantity_collected_kg === undefined || quantity_collected_kg === null)) {
-    return res.status(400).json({ error: "quantity_collected_kg is required when marking a collection completed." });
-  }
-  if (status === "MISSED" && (!missed_reason || !String(missed_reason).trim())) {
-    return res.status(400).json({ error: "missed_reason is required when marking a collection missed." });
-  }
 
-  const before = await pool.query("SELECT * FROM collections WHERE id = $1", [req.params.id]);
-  if (!before.rows[0]) return res.status(404).json({ error: "Collection not found." });
-
-  // Collectors may only update their own assigned collections
-  if (req.user!.role === "COLLECTOR" && before.rows[0].collector_id !== req.user!.id) {
-    return res.status(403).json({ error: "You can only update your own assigned collections." });
-  }
-
-  const result = await pool.query(
-    `UPDATE collections
-     SET status = $1,
-         quantity_collected_kg = COALESCE($2, quantity_collected_kg),
-         missed_reason = COALESCE($3, missed_reason),
-         actual_pickup_time = COALESCE($4, actual_pickup_time),
-         updated_at = now()
-     WHERE id = $5
-     RETURNING *`,
-    [status, quantity_collected_kg, missed_reason, actual_pickup_time, req.params.id]
+  // Rule 2: bins currently at critical or near-capacity — candidates for increased pickup frequency
+  const hotBins = await pool.query(
+    `SELECT z.name AS zone_name, COUNT(*)::int AS bin_count
+     FROM bins b JOIN zones z ON z.id = b.zone_id
+     WHERE b.status IN ('CRITICAL','NEAR_CAPACITY')
+     GROUP BY z.name ORDER BY bin_count DESC LIMIT 3`
   );
+  for (const row of hotBins.rows) {
+    if (row.bin_count >= 2) {
+      insights.push({
+        id: `bins-${row.zone_name}`,
+        title: `${row.zone_name} has multiple bins near capacity`,
+        description: `${row.bin_count} bins in this zone are currently at Near Capacity or Critical fill level. A recommended action is increasing collection frequency for this zone.`,
+        severity: "warning",
+      });
+    }
+  }
 
-  await logAudit({
-    userId: req.user!.id,
-    action: "UPDATE",
-    recordType: "collection",
-    recordId: Number(req.params.id),
-    description: `${req.user!.fullName} (${req.user!.role}) changed collection ${before.rows[0].collection_code} from ${before.rows[0].status} to ${status}.`,
-    previousValue: before.rows[0],
-    newValue: result.rows[0],
-    ip: req.ip,
+  // Rule 3: collectors with the most missed jobs (repeated delays proxy)
+  const delayedCollectors = await pool.query(
+    `SELECT u.full_name, COUNT(*) FILTER (WHERE c.status='MISSED')::int AS missed
+     FROM users u JOIN collections c ON c.collector_id = u.id
+     WHERE u.role='COLLECTOR'
+     GROUP BY u.full_name HAVING COUNT(*) FILTER (WHERE c.status='MISSED') >= 2
+     ORDER BY missed DESC LIMIT 3`
+  );
+  for (const row of delayedCollectors.rows) {
+    insights.push({
+      id: `collector-${row.full_name}`,
+      title: `${row.full_name} has ${row.missed} missed collections`,
+      description: `This collector has repeated missed collections in the seeded history. Consider checking in on route load or recurring obstacles.`,
+      severity: "info",
+    });
+  }
+
+  // Rule 4: days with unusually high completed waste volume (> mean + 1 stddev)
+  const dailyVolume = await pool.query(
+    `SELECT scheduled_date, COALESCE(SUM(quantity_collected_kg),0) AS kg
+     FROM collections WHERE status='COMPLETED' GROUP BY scheduled_date`
+  );
+  const volumes = dailyVolume.rows.map((r) => parseFloat(r.kg));
+  if (volumes.length > 2) {
+    const mean = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+    const variance = volumes.reduce((a, b) => a + (b - mean) ** 2, 0) / volumes.length;
+    const stddev = Math.sqrt(variance);
+    const spikes = dailyVolume.rows.filter((r) => parseFloat(r.kg) > mean + stddev);
+    if (spikes.length > 0) {
+      const top = spikes.sort((a, b) => parseFloat(b.kg) - parseFloat(a.kg))[0];
+      insights.push({
+        id: "volume-spike",
+        title: `Unusually high waste volume on ${new Date(top.scheduled_date).toLocaleDateString()}`,
+        description: `${Math.round(parseFloat(top.kg))} kg was collected that day, above the average of ${Math.round(mean)} kg by more than one standard deviation. Worth checking for a one-off event or a data entry anomaly.`,
+        severity: "info",
+      });
+    }
+  }
+
+  // Rule 5: open critical incidents older than 3 days — needs attention
+  const staleIncidents = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM incidents
+     WHERE status NOT IN ('RESOLVED','CLOSED') AND severity = 'CRITICAL' AND created_at < now() - interval '3 days'`
+  );
+  if (staleIncidents.rows[0].count > 0) {
+    insights.push({
+      id: "stale-critical-incidents",
+      title: `${staleIncidents.rows[0].count} critical incident(s) open for over 3 days`,
+      description: `These tickets have gone unresolved past a reasonable window for CRITICAL severity. Recommend escalating to HSE leadership.`,
+      severity: "critical",
+    });
+  }
+
+  res.json({
+    generated_at: new Date().toISOString(),
+    disclaimer: "These are rule-based recommendations computed from historical data, not AI predictions. Each insight states the rule that produced it.",
+    insights,
   });
-
-  res.json({ collection: result.rows[0] });
 });
 
 export default router;
