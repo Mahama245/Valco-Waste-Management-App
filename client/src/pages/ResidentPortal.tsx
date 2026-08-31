@@ -56,7 +56,7 @@ export default function ResidentPortal() {
       .then(([c, r, z]) => {
         setComplaints(c.data.complaints);
         setRecent(r.data.collections);
-        setMyZone(z.data.zone);
+        setMyZone(z.data.zones[0] || null);
       })
       .finally(() => setLoading(false));
   }
