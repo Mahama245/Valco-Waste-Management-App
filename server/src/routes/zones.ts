@@ -48,7 +48,11 @@ router.get(
               z.collector_id,
               cu.full_name AS collector_name,
               cu.username AS collector_username,
-              COUNT(ru.id) FILTER (WHERE ru.role = 'RESIDENT')::int AS resident_count
+              COUNT(ru.id) FILTER (WHERE ru.role = 'RESIDENT')::int AS resident_count,
+              EXISTS (
+                SELECT 1 FROM collections c
+                WHERE c.zone_id = z.id AND c.scheduled_date = CURRENT_DATE AND c.status = 'COMPLETED'
+              ) AS collected_today
        FROM zones z
        LEFT JOIN users cu ON cu.id = z.collector_id
        LEFT JOIN users ru ON ru.zone_id = z.id
