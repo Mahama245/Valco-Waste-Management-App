@@ -67,9 +67,17 @@ router.get(
 router.get("/my-zone", authenticate, async (req: AuthedRequest, res) => {
   if (req.user!.role === "COLLECTOR") {
     const result = await pool.query(
-      `SELECT z.id, z.name, z.code, z.description
+      `SELECT z.id, z.name, z.code, z.description,
+              COUNT(ru.id) FILTER (WHERE ru.role = 'RESIDENT')::int AS resident_count,
+              EXISTS (
+                SELECT 1 FROM collections c
+                WHERE c.zone_id = z.id AND c.collector_id = $1
+                  AND c.scheduled_date = CURRENT_DATE AND c.status = 'COMPLETED'
+              ) AS collected_today
        FROM zones z
+       LEFT JOIN users ru ON ru.zone_id = z.id
        WHERE z.collector_id = $1
+       GROUP BY z.id, z.name, z.code, z.description
        ORDER BY z.name`,
       [req.user!.id]
     );
@@ -149,5 +157,62 @@ router.patch(
     res.json({ zone: updated.rows[0] });
   }
 );
+
+// A collector scans their zone's printed QR code to record that day's
+// collection for that zone. Only the collector actually assigned to the
+// zone can complete it — this isn't tied to a specific route/stop, it's a
+// zone-level "I collected here today" record.
+router.post("/:zoneId/scan-complete", authenticate, authorize("COLLECTOR"), async (req: AuthedRequest, res) => {
+  const zoneId = Number(req.params.zoneId);
+  if (!Number.isInteger(zoneId)) return res.status(400).json({ error: "Invalid zone id." });
+
+  const { scanned_code } = req.body || {};
+  if (!scanned_code) return res.status(400).json({ error: "scanned_code is required." });
+
+  const zoneRes = await pool.query("SELECT id, name, code, collector_id FROM zones WHERE id = $1", [zoneId]);
+  if (!zoneRes.rows[0]) return res.status(404).json({ error: "Zone not found." });
+  const zone = zoneRes.rows[0];
+
+  if (zone.collector_id !== req.user!.id) {
+    return res.status(403).json({ error: "You're not the assigned collector for this zone." });
+  }
+
+  if (String(scanned_code).trim().toUpperCase() !== zone.code.toUpperCase()) {
+    return res.status(400).json({ error: "That QR code doesn't match this zone." });
+  }
+
+  // Idempotent: if already recorded as collected today, just say so instead of duplicating.
+  const existing = await pool.query(
+    `SELECT id, collection_code FROM collections
+     WHERE zone_id = $1 AND collector_id = $2 AND scheduled_date = CURRENT_DATE AND status = 'COMPLETED'`,
+    [zoneId, req.user!.id]
+  );
+  if (existing.rows[0]) {
+    return res.json({ collection: existing.rows[0], alreadyRecorded: true });
+  }
+
+  const countRes = await pool.query("SELECT COUNT(*)::int AS n FROM collections");
+  const code = `WM-2026-${String(countRes.rows[0].n + 1).padStart(6, "0")}`;
+
+  const result = await pool.query(
+    `INSERT INTO collections
+       (collection_code, zone_id, location, scheduled_date, collector_id, waste_type, priority, status, actual_pickup_time, notes, created_by)
+     VALUES ($1, $2, $3, CURRENT_DATE, $4, 'GENERAL', 'NORMAL', 'COMPLETED', now(), 'Recorded via zone QR scan', $4)
+     RETURNING *`,
+    [code, zoneId, zone.name, req.user!.id]
+  );
+
+  await logAudit({
+    userId: req.user!.id,
+    action: "CREATE",
+    recordType: "collection",
+    recordId: result.rows[0].id,
+    description: `${req.user!.fullName} (${req.user!.role}) scanned the zone QR code for ${zone.name} and recorded today's collection (${code}).`,
+    newValue: result.rows[0],
+    ip: req.ip,
+  });
+
+  res.status(201).json({ collection: result.rows[0], alreadyRecorded: false });
+});
 
 export default router;
