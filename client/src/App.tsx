@@ -6,6 +6,7 @@ import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Collections from "./pages/Collections";
 import Users from "./pages/Users";
+import ZoneManagement from "./pages/ZoneManagement";
 import AuditLog from "./pages/AuditLog";
 import OperationsMap from "./pages/OperationsMap";
 import Bins from "./pages/Bins";
@@ -49,6 +50,7 @@ export default function App() {
             <Route path="reports" element={<Reports />} />
             <Route path="insights" element={<Insights />} />
             <Route path="users" element={<Users />} />
+            <Route path="zones" element={<ZoneManagement />} />
             <Route path="audit" element={<AuditLog />} />
           </Route>
         </Routes>
