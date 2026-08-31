@@ -58,6 +58,12 @@ const NAV_ITEMS: NavItem[] = [
   },
   { to: "/users", label: "User Management", code: "USR", roles: ["SUPER_ADMIN", "ICT_ADMIN"] },
   {
+    to: "/zones",
+    label: "Zone & Collector Mgmt",
+    code: "ZCM",
+    roles: ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER"],
+  },
+  {
     to: "/audit",
     label: "Audit Log",
     code: "LOG",
