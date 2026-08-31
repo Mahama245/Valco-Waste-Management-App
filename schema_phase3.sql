@@ -1,105 +1,199 @@
--- VALCO Waste Management Platform — Phase 2 schema additions
--- Adds: smart bins, vehicle GPS/fleet detail, incidents, complaints, notifications
+// Seeds the database with DEMO DATA for presentation purposes.
+// Run with: npm run seed
+import bcrypt from "bcryptjs";
+import { pool } from "./pool";
 
-CREATE TYPE bin_status AS ENUM ('NORMAL', 'NEAR_CAPACITY', 'CRITICAL', 'OUT_OF_SERVICE');
-CREATE TYPE vehicle_status AS ENUM ('AVAILABLE', 'ASSIGNED', 'EN_ROUTE', 'COLLECTING', 'RETURNING', 'MAINTENANCE', 'OFFLINE');
-CREATE TYPE incident_category AS ENUM (
-  'OVERFLOWING_BIN', 'MISSED_COLLECTION', 'ILLEGAL_DUMPING', 'DAMAGED_BIN', 'HAZARDOUS_WASTE',
-  'WASTE_SPILL', 'BLOCKED_ACCESS', 'VEHICLE_BREAKDOWN', 'WORKER_SAFETY', 'ENVIRONMENTAL', 'OTHER'
-);
-CREATE TYPE incident_severity AS ENUM ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL');
-CREATE TYPE incident_status AS ENUM ('NEW', 'ASSIGNED', 'INVESTIGATING', 'RESOLVED', 'CLOSED');
-CREATE TYPE complaint_status AS ENUM ('SUBMITTED', 'IN_REVIEW', 'RESOLVED', 'CLOSED');
+const ZONE_NAMES = [
+  "Smelter Plant Area", "Administration Block", "Estate Housing A", "Estate Housing B",
+  "Workshop & Maintenance Yard", "Warehouse & Stores", "Port Access Road", "Main Gate Area",
+  "Carbon Plant Zone", "Potroom 1", "Potroom 2", "Cast House", "Rectifier Station",
+  "Staff Clinic Area", "Sports Complex", "Guest House Zone", "Fuel Depot", "Scrap Yard",
+  "Effluent Treatment Zone", "Perimeter Zone North", "Perimeter Zone South", "Canteen Block"
+];
 
--- Extend vehicles table (created in Phase 1) with fleet-management detail
-ALTER TABLE vehicles
-  ADD COLUMN IF NOT EXISTS capacity_kg NUMERIC(10,2),
-  ADD COLUMN IF NOT EXISTS fuel_type VARCHAR(30),
-  ADD COLUMN IF NOT EXISTS mileage_km NUMERIC(10,1),
-  ADD COLUMN IF NOT EXISTS insurance_expiry DATE,
-  ADD COLUMN IF NOT EXISTS roadworthy_expiry DATE,
-  ADD COLUMN IF NOT EXISTS maintenance_due DATE,
-  ADD COLUMN IF NOT EXISTS driver_id INTEGER REFERENCES users(id),
-  ADD COLUMN IF NOT EXISTS current_lat NUMERIC(9,6),
-  ADD COLUMN IF NOT EXISTS current_lng NUMERIC(9,6),
-  ADD COLUMN IF NOT EXISTS speed_kmh NUMERIC(5,1) DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS trip_distance_km NUMERIC(8,1) DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS last_gps_update TIMESTAMPTZ;
+const FIRST_NAMES = ["Kwame", "Ama", "Kofi", "Efua", "Yaw", "Abena", "Kojo", "Akosua", "Kwabena", "Adjoa", "Kwaku", "Afia", "Yaa", "Fiifi", "Esi"];
+const LAST_NAMES = ["Mensah", "Osei", "Boateng", "Owusu", "Asante", "Appiah", "Darko", "Agyeman", "Amoah", "Adjei"];
 
-ALTER TABLE vehicles ALTER COLUMN status TYPE vehicle_status USING status::vehicle_status;
-ALTER TABLE vehicles ALTER COLUMN status SET DEFAULT 'AVAILABLE';
+function randomName() {
+  return `${FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)]} ${LAST_NAMES[Math.floor(Math.random() * LAST_NAMES.length)]}`;
+}
 
-CREATE TABLE bins (
-  id SERIAL PRIMARY KEY,
-  bin_code VARCHAR(30) UNIQUE NOT NULL,  -- e.g. WM-BIN-00482
-  zone_id INTEGER NOT NULL REFERENCES zones(id),
-  location VARCHAR(200) NOT NULL,
-  lat NUMERIC(9,6),
-  lng NUMERIC(9,6),
-  waste_type waste_type NOT NULL DEFAULT 'GENERAL',
-  capacity_liters NUMERIC(8,1) NOT NULL DEFAULT 1100,
-  fill_level_pct NUMERIC(5,1) NOT NULL DEFAULT 0,
-  status bin_status NOT NULL DEFAULT 'NORMAL',
-  condition VARCHAR(30) NOT NULL DEFAULT 'GOOD',
-  installed_at DATE NOT NULL DEFAULT CURRENT_DATE,
-  last_collected_at TIMESTAMPTZ,
-  next_scheduled_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+async function main() {
+  console.log("Seeding VALCO Waste Management demo data...");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-CREATE TABLE incidents (
-  id SERIAL PRIMARY KEY,
-  ticket_number VARCHAR(30) UNIQUE NOT NULL, -- e.g. INC-2026-00481
-  reporter_id INTEGER REFERENCES users(id),
-  zone_id INTEGER REFERENCES zones(id),
-  location VARCHAR(200) NOT NULL,
-  lat NUMERIC(9,6),
-  lng NUMERIC(9,6),
-  category incident_category NOT NULL,
-  severity incident_severity NOT NULL DEFAULT 'MEDIUM',
-  description TEXT NOT NULL,
-  photo_note VARCHAR(200), -- placeholder reference; real file storage is a later integration
-  assigned_officer_id INTEGER REFERENCES users(id),
-  status incident_status NOT NULL DEFAULT 'NEW',
-  resolution TEXT,
-  resolved_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+    // Wipe existing demo data (safe for dev/demo only)
+    await client.query("TRUNCATE audit_logs, collections, vehicles, users, zones RESTART IDENTITY CASCADE");
 
-CREATE TABLE complaints (
-  id SERIAL PRIMARY KEY,
-  tracking_number VARCHAR(30) UNIQUE NOT NULL, -- e.g. CMP-2026-00312
-  resident_id INTEGER NOT NULL REFERENCES users(id),
-  category VARCHAR(50) NOT NULL, -- missed_collection | overflowing_bin | illegal_dumping | damaged_bin | other
-  location VARCHAR(200),
-  description TEXT NOT NULL,
-  status complaint_status NOT NULL DEFAULT 'SUBMITTED',
-  response TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+    // --- Zones ---
+    const zoneIds: number[] = [];
+    for (const name of ZONE_NAMES) {
+      const code = "Z" + String(zoneIds.length + 1).padStart(3, "0");
+      const res = await client.query(
+        "INSERT INTO zones (name, code, description) VALUES ($1, $2, $3) RETURNING id",
+        [name, code, `Waste collection zone covering ${name}.`]
+      );
+      zoneIds.push(res.rows[0].id);
+    }
+    console.log(`Created ${zoneIds.length} zones.`);
 
-CREATE TABLE notifications (
-  id SERIAL PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  type VARCHAR(50) NOT NULL, -- missed_collection | bin_critical | incident_assigned | complaint_resolved | maintenance_due | ...
-  title VARCHAR(150) NOT NULL,
-  body TEXT,
-  record_type VARCHAR(50),
-  record_id INTEGER,
-  is_read BOOLEAN NOT NULL DEFAULT false,
-  -- These flags reflect the mock dispatch architecture described in the platform brief:
-  -- no real email/SMS provider is connected yet, so both stay false until one is wired in.
-  email_dispatched BOOLEAN NOT NULL DEFAULT false,
-  sms_dispatched BOOLEAN NOT NULL DEFAULT false,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+    // --- Users: one demo account per role, plus extra collectors/drivers/residents ---
+    const passwordHash = await bcrypt.hash("Demo@2026", 10);
 
-CREATE INDEX idx_bins_zone ON bins(zone_id);
-CREATE INDEX idx_bins_status ON bins(status);
-CREATE INDEX idx_incidents_status ON incidents(status);
-CREATE INDEX idx_incidents_zone ON incidents(zone_id);
-CREATE INDEX idx_complaints_resident ON complaints(resident_id);
-CREATE INDEX idx_notifications_user ON notifications(user_id, is_read);
+    const demoAccounts: { username: string; role: string; full_name: string; department?: string }[] = [
+      { username: "superadmin", role: "SUPER_ADMIN", full_name: "Nana Boateng", department: "Executive" },
+      { username: "ictadmin", role: "ICT_ADMIN", full_name: "Kwabena Owusu", department: "ICT" },
+      { username: "wastemanager", role: "WASTE_MANAGER", full_name: "Ama Serwaa", department: "Waste Operations" },
+      { username: "supervisor", role: "SUPERVISOR", full_name: "Yaw Frimpong", department: "Waste Operations" },
+      { username: "hseofficer", role: "HSE_OFFICER", full_name: "Efua Asantewaa", department: "Environmental / HSE" },
+      { username: "contractor1", role: "CONTRACTOR", full_name: "GreenCycle Ghana Ltd", department: "External Contractor" },
+      { username: "resident1", role: "RESIDENT", full_name: "Kofi Adjei", department: "Estate Housing A" },
+      { username: "management", role: "MANAGEMENT", full_name: "Dr. Abena Nyarko", department: "Executive" },
+      { username: "mahama245", role: "SUPER_ADMIN", full_name: "Mahama", department: "ICT / Attachment" },
+    ];
+
+    const roleToUserId: Record<string, number[]> = {};
+
+    for (const acc of demoAccounts) {
+      const zoneId = zoneIds[Math.floor(Math.random() * zoneIds.length)];
+      const res = await client.query(
+        `INSERT INTO users (full_name, username, email, password_hash, role, department, zone_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [acc.full_name, acc.username, `${acc.username}@valco.demo`, passwordHash, acc.role, acc.department, zoneId]
+      );
+      roleToUserId[acc.role] = roleToUserId[acc.role] || [];
+      roleToUserId[acc.role].push(res.rows[0].id);
+    }
+
+    // 10+ collectors, 8+ drivers
+    for (let i = 1; i <= 12; i++) {
+      const name = randomName();
+      const username = `collector${i}`;
+      const zoneId = zoneIds[Math.floor(Math.random() * zoneIds.length)];
+      const res = await client.query(
+        `INSERT INTO users (full_name, username, email, password_hash, role, department, zone_id)
+         VALUES ($1, $2, $3, $4, 'COLLECTOR', 'Waste Operations', $5) RETURNING id`,
+        [name, username, `${username}@valco.demo`, passwordHash, zoneId]
+      );
+      roleToUserId.COLLECTOR = roleToUserId.COLLECTOR || [];
+      roleToUserId.COLLECTOR.push(res.rows[0].id);
+    }
+    for (let i = 1; i <= 8; i++) {
+      const name = randomName();
+      const username = `driver${i}`;
+      await client.query(
+        `INSERT INTO users (full_name, username, email, password_hash, role, department)
+         VALUES ($1, $2, $3, $4, 'DRIVER', 'Fleet')`,
+        [name, username, `${username}@valco.demo`, passwordHash]
+      );
+    }
+    console.log(`Created ${demoAccounts.length + 12 + 8} demo user accounts (all use password: Demo@2026).`);
+
+    // --- Vehicles ---
+    const vehicleTypes = ["Compactor Truck", "Skip Loader", "Pickup Truck", "Tipper Truck"];
+    const vehicleIds: number[] = [];
+    for (let i = 1; i <= 8; i++) {
+      const reg = `VS-${String(i).padStart(2, "0")}`;
+      const type = vehicleTypes[Math.floor(Math.random() * vehicleTypes.length)];
+      const res = await client.query(
+        "INSERT INTO vehicles (registration_number, vehicle_type, status) VALUES ($1, $2, 'AVAILABLE') RETURNING id",
+        [reg, type]
+      );
+      vehicleIds.push(res.rows[0].id);
+    }
+    console.log(`Created ${vehicleIds.length} vehicles.`);
+
+    // --- Collections: historical + today + upcoming ---
+    const wasteTypes = ["GENERAL", "PLASTIC", "PAPER", "METAL", "GLASS", "ORGANIC", "HAZARDOUS", "E_WASTE", "OTHER"];
+    const priorities = ["LOW", "NORMAL", "NORMAL", "NORMAL", "HIGH"]; // weighted toward NORMAL
+    const collectors = roleToUserId.COLLECTOR;
+    const supervisorId = roleToUserId.SUPERVISOR[0];
+
+    let collectionCount = 0;
+    const today = new Date();
+
+    for (let dayOffset = -14; dayOffset <= 3; dayOffset++) {
+      const date = new Date(today);
+      date.setDate(date.getDate() + dayOffset);
+      const dateStr = date.toISOString().slice(0, 10);
+
+      const numCollectionsToday = 6 + Math.floor(Math.random() * 6); // 6-11 per day
+      for (let i = 0; i < numCollectionsToday; i++) {
+        collectionCount++;
+        const code = `WM-2026-${String(collectionCount).padStart(6, "0")}`;
+        const zoneId = zoneIds[Math.floor(Math.random() * zoneIds.length)];
+        const collectorId = collectors[Math.floor(Math.random() * collectors.length)];
+        const vehicleId = vehicleIds[Math.floor(Math.random() * vehicleIds.length)];
+        const wType = wasteTypes[Math.floor(Math.random() * wasteTypes.length)];
+        const priority = priorities[Math.floor(Math.random() * priorities.length)];
+
+        let status = "PENDING";
+        let actualPickup: string | null = null;
+        let quantity: number | null = null;
+        let missedReason: string | null = null;
+
+        if (dayOffset < 0) {
+          // past days: mostly completed, some missed
+          const roll = Math.random();
+          if (roll < 0.85) {
+            status = "COMPLETED";
+            actualPickup = `${dateStr}T${String(6 + Math.floor(Math.random() * 6)).padStart(2, "0")}:${String(Math.floor(Math.random() * 60)).padStart(2, "0")}:00Z`;
+            quantity = Math.round((50 + Math.random() * 950) * 100) / 100;
+          } else {
+            status = "MISSED";
+            missedReason = ["Vehicle breakdown", "Access blocked", "Collector unavailable", "Bin inaccessible"][Math.floor(Math.random() * 4)];
+          }
+        } else if (dayOffset === 0) {
+          const roll = Math.random();
+          status = roll < 0.6 ? "COMPLETED" : roll < 0.85 ? "IN_PROGRESS" : "PENDING";
+          if (status === "COMPLETED") {
+            actualPickup = `${dateStr}T${String(6 + Math.floor(Math.random() * 4)).padStart(2, "0")}:00:00Z`;
+            quantity = Math.round((50 + Math.random() * 950) * 100) / 100;
+          }
+        } else {
+          status = "PENDING";
+        }
+
+        await client.query(
+          `INSERT INTO collections
+            (collection_code, zone_id, location, scheduled_date, scheduled_time, collector_id, vehicle_id,
+             waste_type, priority, status, actual_pickup_time, quantity_collected_kg, missed_reason, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          [
+            code, zoneId, `Bin cluster near ${ZONE_NAMES[zoneId - 1] || "zone"}`, dateStr,
+            `${String(6 + Math.floor(Math.random() * 6)).padStart(2, "0")}:00`,
+            collectorId, vehicleId, wType, priority, status, actualPickup, quantity, missedReason, supervisorId
+          ]
+        );
+      }
+    }
+    console.log(`Created ${collectionCount} collections spanning the last 14 days through the next 3 days.`);
+
+    // --- Sample audit log entries ---
+    await client.query(
+      `INSERT INTO audit_logs (user_id, action, record_type, record_id, description)
+       VALUES
+       ($1, 'UPDATE', 'collection', 1, 'Supervisor changed collection WM-2026-000001 from Pending to Completed.'),
+       ($1, 'CREATE', 'user', NULL, 'ICT Admin created a new collector account.'),
+       ($1, 'LOGIN', 'user', NULL, 'Super Admin logged in.')`,
+      [supervisorId]
+    );
+
+    await client.query("COMMIT");
+    console.log("\nSeed complete. Demo login credentials (all use password Demo@2026):");
+    for (const acc of demoAccounts) {
+      console.log(`  ${acc.role.padEnd(14)} -> username: ${acc.username}`);
+    }
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Seed failed:", err);
+    throw err;
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
+main();

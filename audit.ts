@@ -1,36 +1,37 @@
-import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
+-- VALCO Waste Management Platform — Phase 3 schema additions
+-- Adds: route planning (routes + ordered stops linking to collections)
 
-const JWT_SECRET = process.env.JWT_SECRET || "change-this-secret-in-production";
+CREATE TYPE route_status AS ENUM ('PLANNED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED');
 
-export interface AuthedRequest extends Request {
-  user?: { id: number; username: string; role: string; fullName: string };
-}
+CREATE TABLE routes (
+  id SERIAL PRIMARY KEY,
+  route_code VARCHAR(30) UNIQUE NOT NULL, -- e.g. RT-2026-008
+  name VARCHAR(150) NOT NULL,
+  collector_id INTEGER REFERENCES users(id),
+  vehicle_id INTEGER REFERENCES vehicles(id),
+  scheduled_date DATE NOT NULL,
+  estimated_distance_km NUMERIC(6,1),
+  estimated_duration_min INTEGER,
+  status route_status NOT NULL DEFAULT 'PLANNED',
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_by INTEGER REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
-export function authenticate(req: AuthedRequest, res: Response, next: NextFunction) {
-  const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ error: "Missing authentication token." });
-  try {
-    const payload = jwt.verify(token, JWT_SECRET) as any;
-    req.user = { id: payload.id, username: payload.username, role: payload.role, fullName: payload.fullName };
-    next();
-  } catch {
-    return res.status(401).json({ error: "Invalid or expired token." });
-  }
-}
+CREATE TABLE route_stops (
+  id SERIAL PRIMARY KEY,
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  collection_id INTEGER REFERENCES collections(id),
+  stop_order INTEGER NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDING', -- PENDING | COMPLETED | SKIPPED
+  arrived_at TIMESTAMPTZ,
+  -- offline-first support: collectors can complete a stop while offline; the
+  -- client stamps a local timestamp and flips this true, then the sync
+  -- endpoint reconciles it against the server record once back online.
+  synced BOOLEAN NOT NULL DEFAULT true,
+  UNIQUE (route_id, stop_order)
+);
 
-// Usage: authorize('SUPER_ADMIN', 'ICT_ADMIN')
-export function authorize(...allowedRoles: string[]) {
-  return (req: AuthedRequest, res: Response, next: NextFunction) => {
-    if (!req.user) return res.status(401).json({ error: "Not authenticated." });
-    if (!allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({ error: "You don't have permission to perform this action." });
-    }
-    next();
-  };
-}
-
-export function signToken(user: { id: number; username: string; role: string; fullName: string }) {
-  return jwt.sign(user, JWT_SECRET, { expiresIn: "12h" });
-}
+CREATE INDEX idx_route_stops_route ON route_stops(route_id);
+CREATE INDEX idx_routes_collector_date ON routes(collector_id, scheduled_date);

@@ -1,32 +1,26 @@
-import axios from "axios";
+interface Props {
+  label: string;
+  value: string | number;
+  accent?: "gold" | "success" | "warning" | "critical" | "info";
+  suffix?: string;
+}
 
-export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://localhost:4000/api",
-});
+const ACCENTS: Record<string, string> = {
+  gold: "border-l-gold-500",
+  success: "border-l-status-success",
+  warning: "border-l-status-warning",
+  critical: "border-l-status-critical",
+  info: "border-l-status-info",
+};
 
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("valco_token");
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
-
-api.interceptors.response.use(
-  (res) => res,
-  (err) => {
-    if (err.response?.status === 401) {
-      localStorage.removeItem("valco_token");
-      localStorage.removeItem("valco_user");
-      if (!window.location.pathname.includes("/login")) {
-        window.location.href = "/login";
-      }
-    }
-    return Promise.reject(err);
-  }
-);
-
-export interface CurrentUser {
-  id: number;
-  username: string;
-  fullName: string;
-  role: string;
+export default function KpiCard({ label, value, accent = "gold", suffix }: Props) {
+  return (
+    <div className={`bg-graphite-800 border border-graphite-700 border-l-[3px] ${ACCENTS[accent]} rounded-sm p-4`}>
+      <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-2">{label}</p>
+      <p className="font-display text-3xl font-semibold text-white">
+        {value}
+        {suffix && <span className="text-base text-gray-400 ml-1 font-body">{suffix}</span>}
+      </p>
+    </div>
+  );
 }

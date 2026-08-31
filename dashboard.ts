@@ -1,39 +1,46 @@
 import { Router } from "express";
 import { pool } from "../db/pool";
-import { authenticate } from "../middleware/auth";
+import { authenticate, authorize, AuthedRequest } from "../middleware/auth";
 
 const router = Router();
+const STAFF_ROLES = ["SUPER_ADMIN", "ICT_ADMIN", "WASTE_MANAGER", "SUPERVISOR"];
 
-// NOTE: current_lat/lng/speed are simulated (see seed_phase2.ts). There is no
-// real GPS hardware connected. Swap the update mechanism in a device-gateway
-// service later; this route/schema shape stays the same either way.
-router.get("/", authenticate, async (_req, res) => {
+// Residents see only their own complaints; staff see all
+router.get("/", authenticate, async (req: AuthedRequest, res) => {
+  const isStaff = STAFF_ROLES.includes(req.user!.role);
   const result = await pool.query(
-    `SELECT v.id, v.registration_number, v.vehicle_type, v.status, v.capacity_kg, v.fuel_type,
-            v.mileage_km, v.insurance_expiry, v.roadworthy_expiry, v.maintenance_due,
-            v.driver_id, u.full_name AS driver_name,
-            v.current_lat, v.current_lng, v.speed_kmh, v.trip_distance_km, v.last_gps_update
-     FROM vehicles v LEFT JOIN users u ON u.id = v.driver_id
-     ORDER BY v.registration_number`
+    isStaff
+      ? `SELECT c.*, u.full_name AS resident_name FROM complaints c JOIN users u ON u.id = c.resident_id ORDER BY c.created_at DESC`
+      : `SELECT c.* FROM complaints c WHERE c.resident_id = $1 ORDER BY c.created_at DESC`,
+    isStaff ? [] : [req.user!.id]
   );
-  res.json({ vehicles: result.rows });
+  res.json({ complaints: result.rows });
 });
 
-router.get("/alerts", authenticate, async (_req, res) => {
+router.post("/", authenticate, async (req: AuthedRequest, res) => {
+  const { category, location, description } = req.body || {};
+  if (!category || !description) return res.status(400).json({ error: "category and description are required." });
+
+  const countRes = await pool.query("SELECT COUNT(*)::int AS n FROM complaints");
+  const tracking = `CMP-2026-${String(10000 + countRes.rows[0].n + 1)}`;
+
   const result = await pool.query(
-    `SELECT id, registration_number, status,
-       (maintenance_due <= CURRENT_DATE + interval '7 days') AS maintenance_due_soon,
-       (insurance_expiry <= CURRENT_DATE + interval '30 days') AS insurance_expiring,
-       (roadworthy_expiry <= CURRENT_DATE + interval '30 days') AS roadworthy_expiring,
-       (last_gps_update < now() - interval '10 minutes') AS gps_stale
-     FROM vehicles
-     WHERE status = 'OFFLINE'
-        OR maintenance_due <= CURRENT_DATE + interval '7 days'
-        OR insurance_expiry <= CURRENT_DATE + interval '30 days'
-        OR roadworthy_expiry <= CURRENT_DATE + interval '30 days'
-        OR last_gps_update < now() - interval '10 minutes'`
+    `INSERT INTO complaints (tracking_number, resident_id, category, location, description)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [tracking, req.user!.id, category, location || null, description]
   );
-  res.json({ alerts: result.rows });
+  res.status(201).json({ complaint: result.rows[0] });
+});
+
+router.patch("/:id", authenticate, authorize(...STAFF_ROLES), async (req, res) => {
+  const { status, response } = req.body || {};
+  const result = await pool.query(
+    `UPDATE complaints SET status = COALESCE($1, status), response = COALESCE($2, response), updated_at = now()
+     WHERE id = $3 RETURNING *`,
+    [status, response, req.params.id]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: "Complaint not found." });
+  res.json({ complaint: result.rows[0] });
 });
 
 export default router;

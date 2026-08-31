@@ -1,85 +1,127 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../AuthContext";
 
-interface RouteRow {
+interface AuditRow {
   id: number;
-  route_code: string;
-  name: string;
-  collector_name: string | null;
-  vehicle_reg: string | null;
-  scheduled_date: string;
-  estimated_distance_km: string | null;
-  estimated_duration_min: number | null;
-  status: string;
-  total_stops: number;
-  completed_stops: number;
+  action: string;
+  record_type: string;
+  record_id: number | null;
+  description: string;
+  created_at: string;
+  actor_name: string | null;
+  actor_role: string | null;
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  PLANNED: "text-status-info border-status-info/30",
-  IN_PROGRESS: "text-status-warning border-status-warning/30",
-  COMPLETED: "text-status-success border-status-success/30",
-  CANCELLED: "text-gray-500 border-graphite-600",
+const ACTION_COLORS: Record<string, string> = {
+  CREATE: "text-status-success",
+  UPDATE: "text-status-warning",
+  DELETE: "text-status-critical",
+  LOGIN: "text-status-info",
 };
 
-export default function Routes() {
-  const [routes, setRoutes] = useState<RouteRow[]>([]);
+export default function AuditLog() {
+  const { user } = useAuth();
+  const [logs, setLogs] = useState<AuditRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const canDelete = user?.role === "SUPER_ADMIN";
 
-  useEffect(() => {
-    api.get("/routes").then((res) => setRoutes(res.data.routes)).finally(() => setLoading(false));
-  }, []);
+  function load() {
+    setLoading(true);
+    api
+      .get("/audit-logs")
+      .then((res) => setLogs(res.data.audit_logs))
+      .catch(() => setError("Couldn't load the audit log."))
+      .finally(() => setLoading(false));
+  }
+ useEffect(() => {
+  load(); // initial load
+  const interval = setInterval(load, 5000);
+  return () => clearInterval(interval);
+}, []);
+
+  async function deleteEntry(id: number) {
+    if (!confirm("Delete this log entry permanently?")) return;
+    setBusyId(id);
+    try {
+      await api.delete(`/audit-logs/${id}`);
+      load();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function clearAll() {
+    if (!confirm(`Delete ALL ${logs.length} audit log entries? This can't be undone.`)) return;
+    if (!confirm("Really sure? This wipes the entire compliance history.")) return;
+    setBusyId(-1);
+    try {
+      await api.delete("/audit-logs");
+      load();
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   return (
     <div className="space-y-5">
-      <div>
-        <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Field Operations</p>
-        <h1 className="font-display text-2xl font-semibold text-white">Smart Route Management</h1>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Compliance</p>
+          <h1 className="font-display text-2xl font-semibold text-white">Audit Log</h1>
+          <p className="text-sm text-gray-400 mt-1">
+            A record of actions taken across the platform.
+            {canDelete && " As Super Admin you can delete individual entries or clear the log — each deletion is itself logged."}
+          </p>
+        </div>
+        {canDelete && logs.length > 0 && (
+          <button
+            onClick={clearAll}
+            disabled={busyId === -1}
+            className="text-xs text-status-critical border border-status-critical/40 hover:bg-status-criticalBg px-3 py-1.5 rounded-sm disabled:opacity-50"
+          >
+            {busyId === -1 ? "Clearing..." : "Clear entire log"}
+          </button>
+        )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {error && <div className="text-status-critical text-sm">{error}</div>}
+
+      <div className="bg-graphite-800 border border-graphite-700 rounded-sm divide-y divide-graphite-700/60">
         {loading ? (
-          <p className="text-gray-500 text-sm col-span-full">Loading routes...</p>
-        ) : routes.length === 0 ? (
-          <p className="text-gray-500 text-sm col-span-full">No routes planned yet.</p>
+          <div className="px-4 py-10 text-center text-gray-500 text-sm">Loading audit log...</div>
+        ) : logs.length === 0 ? (
+          <div className="px-4 py-10 text-center text-gray-500 text-sm">No activity recorded yet.</div>
         ) : (
-          routes.map((r) => {
-            const pct = r.total_stops ? Math.round((r.completed_stops / r.total_stops) * 100) : 0;
-            return (
-              <Link
-                key={r.id}
-                to={`/routes/${r.id}`}
-                className="bg-graphite-800 border border-graphite-700 hover:border-gold-500/40 rounded-sm p-4 transition-colors"
-              >
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-mono text-xs text-gold-500">{r.route_code}</span>
-                  <span className={`text-[10px] uppercase px-2 py-0.5 rounded-sm border ${STATUS_COLORS[r.status]}`}>
-                    {r.status.replace("_", " ")}
-                  </span>
-                </div>
-                <p className="text-sm text-white font-medium mb-1">{r.name}</p>
-                <p className="text-xs text-gray-400 mb-3">
-                  {r.collector_name || "Unassigned"} · {r.vehicle_reg || "No vehicle"}
-                </p>
-
-                <div className="mb-2">
-                  <div className="flex justify-between text-[11px] text-gray-400 mb-1">
-                    <span>{r.completed_stops} / {r.total_stops} stops</span>
-                    <span>{pct}%</span>
-                  </div>
-                  <div className="w-full h-1.5 bg-graphite-900 rounded-full overflow-hidden">
-                    <div className="h-full bg-gold-500" style={{ width: `${pct}%` }} />
-                  </div>
-                </div>
-
-                <p className="text-[11px] text-gray-500">
-                  {r.estimated_distance_km ? `${r.estimated_distance_km} km` : "—"} ·{" "}
-                  {r.estimated_duration_min ? `${r.estimated_duration_min} min` : "—"}
-                </p>
-              </Link>
-            );
-          })
+          logs.map((log) => (
+            <div key={log.id} className="flex items-start gap-4 px-4 py-3">
+              <span className={`text-[11px] font-mono uppercase w-16 shrink-0 ${ACTION_COLORS[log.action] || "text-gray-400"}`}>
+                {log.action}
+              </span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-gray-200">{log.description}</p>
+                {log.actor_name && (
+                  <p className="text-[11px] text-gray-500 mt-0.5">
+                    {log.actor_name} · {log.actor_role}
+                  </p>
+                )}
+              </div>
+              <span className="text-[11px] text-gray-500 font-mono shrink-0">
+                {new Date(log.created_at).toLocaleString()}
+              </span>
+              {canDelete && (
+                <button
+                  onClick={() => deleteEntry(log.id)}
+                  disabled={busyId === log.id}
+                  className="text-[11px] text-gray-600 hover:text-status-critical shrink-0 disabled:opacity-50"
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+          ))
         )}
       </div>
     </div>

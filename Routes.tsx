@@ -1,205 +1,247 @@
 import { useEffect, useState } from "react";
-import { QRCodeSVG } from "qrcode.react";
 import { api } from "../api";
-import StatusBadge from "../components/StatusBadge";
+import { useAuth, ROLE_LABELS } from "../AuthContext";
 
-interface MyBin {
+interface UserRow {
   id: number;
-  bin_code: string;
-  location: string;
-  zone_name: string;
-  fill_level_pct: number;
-  status: string;
-  last_collected_at: string | null;
-  next_scheduled_at: string | null;
+  full_name: string;
+  username: string;
+  email: string;
+  role: string;
+  department: string;
+  is_active: boolean;
+  last_login: string | null;
+  zone_id: number | null;
+  zone_name: string | null;
 }
 
-interface Complaint {
+interface Zone {
   id: number;
-  tracking_number: string;
-  category: string;
-  location: string;
-  description: string;
-  status: string;
-  response: string | null;
-  created_at: string;
+  name: string;
+  code: string;
 }
 
-interface RecentCollection {
-  id: number;
-  collection_code: string;
-  location: string;
-  actual_pickup_time: string | null;
-  waste_type: string;
-  confirmation_id: number | null;
-  rating: number | null;
-  comment: string | null;
-}
+const ROLES = Object.keys(ROLE_LABELS);
 
-const CATEGORIES = [
-  { value: "missed_collection", label: "Missed Collection" },
-  { value: "overflowing_bin", label: "Overflowing Bin" },
-  { value: "illegal_dumping", label: "Illegal Dumping" },
-  { value: "damaged_bin", label: "Damaged Bin" },
-  { value: "other", label: "Other" },
-];
-
-export default function ResidentPortal() {
-  const [complaints, setComplaints] = useState<Complaint[]>([]);
-  const [recent, setRecent] = useState<RecentCollection[]>([]);
-  const [myBin, setMyBin] = useState<MyBin | null>(null);
-  const [showForm, setShowForm] = useState(false);
+export default function Users() {
+  const { user: me } = useAuth();
+  const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [editingUser, setEditingUser] = useState<UserRow | null>(null);
+  const [showAddForm, setShowAddForm] = useState(false);
 
   function load() {
     setLoading(true);
-    Promise.all([
-      api.get("/complaints"),
-      api.get("/confirmations/recent-in-my-zone"),
-      api.get("/bins/my-bin"),
-    ])
-      .then(([c, r, b]) => {
-        setComplaints(c.data.complaints);
-        setRecent(r.data.collections);
-        setMyBin(b.data.bin);
-      })
+    api
+      .get("/users")
+      .then((res) => setUsers(res.data.users))
+      .catch(() => setError("Couldn't load users."))
       .finally(() => setLoading(false));
   }
+
   useEffect(load, []);
 
-  async function submitConfirmation(collectionId: number, rating: number) {
-    await api.post("/confirmations", { collection_id: collectionId, rating });
-    load();
+  async function deactivate(id: number) {
+    setBusyId(id);
+    try {
+      await api.patch(`/users/${id}/deactivate`);
+      load();
+    } catch (err: any) {
+      setError(err.response?.data?.error || "Couldn't deactivate this account.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function reactivate(id: number) {
+    setBusyId(id);
+    try {
+      await api.patch(`/users/${id}/reactivate`);
+      load();
+    } catch {
+      setError("Couldn't reactivate this account.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function deleteUser(id: number) {
+    if (!confirm("Permanently delete this account? This can't be undone.")) return;
+    setBusyId(id);
+    try {
+      await api.delete(`/users/${id}`);
+      load();
+    } catch (err: any) {
+      alert(err.response?.data?.error || "Couldn't delete this account.");
+    } finally {
+      setBusyId(null);
+    }
   }
 
   return (
-    <div className="space-y-6 max-w-2xl">
-      <div>
-        <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Resident Portal</p>
-        <h1 className="font-display text-2xl font-semibold text-white">Waste Collection</h1>
-      </div>
-
-      {myBin ? (
-        <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5 flex items-center gap-5">
-          <div className="bg-white p-2 rounded-sm flex-shrink-0">
-            <QRCodeSVG value={myBin.bin_code} size={100} />
-          </div>
-          <div>
-            <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">Your Bin</p>
-            <p className="font-display text-lg text-white">{myBin.bin_code}</p>
-            <p className="text-sm text-gray-400">{myBin.location} — {myBin.zone_name}</p>
-            <p className="text-sm text-gray-400 mt-1">
-              {myBin.last_collected_at
-                ? `Last collected: ${new Date(myBin.last_collected_at).toLocaleString()}`
-                : "Not collected yet"}
-            </p>
-            <p className="text-xs text-gray-500 mt-1">
-              Show this QR code to your collector at pickup — scanning it marks your collection done here and on the admin dashboard.
-            </p>
-          </div>
-        </div>
-      ) : (
-        !loading && (
-          <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5 text-sm text-gray-400">
-            No bin is linked to your account yet — contact an administrator to get your personal QR code set up.
-          </div>
-        )
-      )}
-
-      <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5">
-        <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">Next Collection</p>
-        <p className="font-display text-2xl text-white">Monday</p>
-        <p className="text-sm text-gray-400">7:00 AM – 9:00 AM</p>
-      </div>
-
-      {recent.length > 0 && (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h2 className="font-display text-lg text-white mb-3">Confirm Recent Collections</h2>
-          <div className="space-y-2">
-            {recent.map((c) => (
-              <div key={c.id} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-mono text-xs text-gold-500">{c.collection_code}</span>
-                  <span className="text-[11px] text-gray-500">
-                    {c.actual_pickup_time ? new Date(c.actual_pickup_time).toLocaleDateString() : "—"}
-                  </span>
-                </div>
-                <p className="text-sm text-gray-200 mb-2">{c.location} · {c.waste_type?.replace("_", " ")}</p>
-                {c.confirmation_id ? (
-                  <p className="text-xs text-status-success">
-                    ✓ You confirmed this {c.rating ? `— rated ${c.rating}/5` : ""}
-                  </p>
-                ) : (
-                  <div className="flex items-center gap-1">
-                    <span className="text-[11px] text-gray-400 mr-1">Confirm & rate:</span>
-                    {[1, 2, 3, 4, 5].map((n) => (
-                      <button
-                        key={n}
-                        onClick={() => submitConfirmation(c.id, n)}
-                        className="text-lg text-gray-600 hover:text-gold-500 transition-colors"
-                        title={`${n} star${n > 1 ? "s" : ""}`}
-                      >
-                        ★
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
+          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Administration</p>
+          <h1 className="font-display text-2xl font-semibold text-white">User Management</h1>
         </div>
-      )}
-
-      <div className="flex items-center justify-between">
-        <h2 className="font-display text-lg text-white">My Reports</h2>
         <button
-          onClick={() => setShowForm((s) => !s)}
+          onClick={() => setShowAddForm((s) => !s)}
           className="text-sm bg-gold-500 hover:bg-gold-400 text-graphite-950 font-semibold px-3 py-1.5 rounded-sm"
         >
-          {showForm ? "Cancel" : "+ Report an Issue"}
+          {showAddForm ? "Cancel" : "+ Create Account"}
         </button>
       </div>
 
-      {showForm && <ReportForm onSubmitted={() => { setShowForm(false); load(); }} />}
+      {error && <div className="text-status-critical text-sm">{error}</div>}
 
-      <div className="space-y-2">
-        {loading ? (
-          <p className="text-gray-500 text-sm">Loading...</p>
-        ) : complaints.length === 0 ? (
-          <p className="text-gray-500 text-sm">No reports submitted yet.</p>
-        ) : (
-          complaints.map((c) => (
-            <div key={c.id} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-mono text-xs text-gold-500">{c.tracking_number}</span>
-                <StatusBadge status={c.status === "SUBMITTED" ? "PENDING" : c.status === "IN_REVIEW" ? "IN_PROGRESS" : c.status} />
-              </div>
-              <p className="text-sm text-gray-200">{c.description}</p>
-              {c.response && (
-                <p className="text-xs text-status-success mt-2 border-l-2 border-status-success/40 pl-2">{c.response}</p>
-              )}
-              <p className="text-[11px] text-gray-500 mt-2">{new Date(c.created_at).toLocaleDateString()}</p>
-            </div>
-          ))
-        )}
+      {showAddForm && <UserForm onSaved={() => { setShowAddForm(false); load(); }} />}
+      {editingUser && (
+        <UserForm existing={editingUser} onSaved={() => { setEditingUser(null); load(); }} onCancel={() => setEditingUser(null)} />
+      )}
+
+      <div className="bg-graphite-800 border border-graphite-700 rounded-sm overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-graphite-700 text-left text-[11px] uppercase tracking-wider text-gray-400">
+              <th className="px-4 py-3 font-medium">Name</th>
+              <th className="px-4 py-3 font-medium">Username</th>
+              <th className="px-4 py-3 font-medium">Role</th>
+              <th className="px-4 py-3 font-medium">Department</th>
+              <th className="px-4 py-3 font-medium">Zone</th>
+              <th className="px-4 py-3 font-medium">Last Login</th>
+              <th className="px-4 py-3 font-medium">Status</th>
+              <th className="px-4 py-3 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr>
+                <td colSpan={8} className="px-4 py-10 text-center text-gray-500">
+                  Loading users...
+                </td>
+              </tr>
+            ) : (
+              users.map((u) => (
+                <tr key={u.id} className="border-b border-graphite-700/60 last:border-0 hover:bg-graphite-700/20">
+                  <td className="px-4 py-2.5 text-gray-100">{u.full_name}</td>
+                  <td className="px-4 py-2.5 font-mono text-xs text-gray-400">{u.username}</td>
+                  <td className="px-4 py-2.5 text-gold-500 text-xs">{ROLE_LABELS[u.role] || u.role}</td>
+                  <td className="px-4 py-2.5 text-gray-300">{u.department || "—"}</td>
+                  <td className="px-4 py-2.5 text-gray-300">{u.zone_name || "—"}</td>
+                  <td className="px-4 py-2.5 text-gray-400 text-xs">
+                    {u.last_login ? new Date(u.last_login).toLocaleString() : "Never"}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span
+                      className={`text-[11px] px-2 py-0.5 rounded-sm border ${
+                        u.is_active
+                          ? "bg-status-successBg text-status-success border-status-success/30"
+                          : "bg-graphite-700 text-gray-500 border-graphite-600"
+                      }`}
+                    >
+                      {u.is_active ? "Active" : "Suspended"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button onClick={() => setEditingUser(u)} className="text-xs text-gold-500 hover:underline">
+                        Edit
+                      </button>
+                      {u.is_active ? (
+                        u.id !== me?.id && (
+                          <button
+                            onClick={() => deactivate(u.id)}
+                            disabled={busyId === u.id}
+                            className="text-xs text-status-warning hover:underline disabled:opacity-50"
+                          >
+                            Suspend
+                          </button>
+                        )
+                      ) : (
+                        <button
+                          onClick={() => reactivate(u.id)}
+                          disabled={busyId === u.id}
+                          className="text-xs text-status-success hover:underline disabled:opacity-50"
+                        >
+                          Reactivate
+                        </button>
+                      )}
+                      {u.id !== me?.id && (
+                        <button
+                          onClick={() => deleteUser(u.id)}
+                          disabled={busyId === u.id}
+                          className="text-xs text-status-critical hover:underline disabled:opacity-50"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );
 }
 
-function ReportForm({ onSubmitted }: { onSubmitted: () => void }) {
-  const [category, setCategory] = useState(CATEGORIES[0].value);
-  const [location, setLocation] = useState("");
-  const [description, setDescription] = useState("");
+function UserForm({
+  existing,
+  onSaved,
+  onCancel,
+}: {
+  existing?: UserRow;
+  onSaved: () => void;
+  onCancel?: () => void;
+}) {
+  const [fullName, setFullName] = useState(existing?.full_name || "");
+  const [username, setUsername] = useState(existing?.username || "");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState(existing?.role || "COLLECTOR");
+  const [department, setDepartment] = useState(existing?.department || "");
+  const [zoneId, setZoneId] = useState(existing?.zone_id ? String(existing.zone_id) : "");
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [zonesError, setZonesError] = useState<string | null>(null);
+  const [zonesLoading, setZonesLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setZonesLoading(true);
+    api
+      .get("/zones")
+      .then((res) => setZones(res.data.zones))
+      .catch(() => setZonesError("Unable to load zones."))
+      .finally(() => setZonesLoading(false));
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!description.trim()) return;
+    setError(null);
     setSubmitting(true);
     try {
-      await api.post("/complaints", { category, location, description });
-      onSubmitted();
+      const zone_id = zoneId ? Number(zoneId) : null;
+      if (existing) {
+        await api.patch(`/users/${existing.id}`, { full_name: fullName, role, department, zone_id });
+        if (password) {
+          await api.patch(`/users/${existing.id}/reset-password`, { new_password: password });
+        }
+      } else {
+        if (!username || !password) {
+          setError("Username and password are required for a new account.");
+          setSubmitting(false);
+          return;
+        }
+        await api.post("/users", { full_name: fullName, username, password, role, department, zone_id });
+      }
+      onSaved();
+    } catch (err: any) {
+      setError(err.response?.data?.error || "Couldn't save this account.");
     } finally {
       setSubmitting(false);
     }
@@ -207,43 +249,101 @@ function ReportForm({ onSubmitted }: { onSubmitted: () => void }) {
 
   return (
     <form onSubmit={submit} className="bg-graphite-800 border border-graphite-700 rounded-sm p-4 space-y-3">
+      <p className="text-sm text-white font-medium">{existing ? `Edit ${existing.full_name}` : "Create a new account"}</p>
+      {error && <div className="text-status-critical text-xs">{error}</div>}
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Full name</span>
+          <input
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+          />
+        </label>
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">
+            Username {existing && <span className="normal-case text-gray-600">(can't be changed)</span>}
+          </span>
+          <input
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            disabled={!!existing}
+            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white disabled:opacity-50"
+          />
+        </label>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Role</span>
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+          >
+            {ROLES.map((r) => (
+              <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Department</span>
+          <input
+            value={department}
+            onChange={(e) => setDepartment(e.target.value)}
+            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
+          />
+        </label>
+      </div>
       <label className="block">
-        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">What's the issue?</span>
-        <select
-          value={category}
-          onChange={(e) => setCategory(e.target.value)}
-          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-        >
-          {CATEGORIES.map((c) => (
-            <option key={c.value} value={c.value}>{c.label}</option>
-          ))}
-        </select>
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Zone</span>
+        {zonesError ? (
+          <p className="text-xs text-status-critical">{zonesError}</p>
+        ) : (
+          <select
+            value={zoneId}
+            onChange={(e) => setZoneId(e.target.value)}
+            disabled={zonesLoading}
+            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white disabled:opacity-50"
+          >
+            <option value="">No zone assigned</option>
+            {zonesLoading ? (
+              <option disabled>Loading zones...</option>
+            ) : zones.length === 0 ? (
+              <option disabled>No zones available.</option>
+            ) : (
+              zones.map((z) => (
+                <option key={z.id} value={z.id}>{z.code} — {z.name}</option>
+              ))
+            )}
+          </select>
+        )}
       </label>
       <label className="block">
-        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Where?</span>
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">
+          {existing ? "Reset password (leave blank to keep current)" : "Password"}
+        </span>
         <input
-          value={location}
-          onChange={(e) => setLocation(e.target.value)}
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
           className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-          placeholder="e.g. Estate Housing A, Block 4"
+          placeholder={existing ? "••••••••" : "At least 6 characters"}
         />
       </label>
-      <label className="block">
-        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Details</span>
-        <textarea
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          rows={3}
-          className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white"
-        />
-      </label>
-      <button
-        type="submit"
-        disabled={submitting}
-        className="text-sm bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
-      >
-        {submitting ? "Submitting..." : "Submit Report"}
-      </button>
+      <div className="flex gap-2">
+        <button
+          type="submit"
+          disabled={submitting}
+          className="text-sm bg-gold-500 hover:bg-gold-400 disabled:opacity-50 text-graphite-950 font-semibold px-4 py-2 rounded-sm"
+        >
+          {submitting ? "Saving..." : existing ? "Save changes" : "Create account"}
+        </button>
+        {onCancel && (
+          <button type="button" onClick={onCancel} className="text-sm text-gray-400 hover:text-white px-4 py-2">
+            Cancel
+          </button>
+        )}
+      </div>
     </form>
   );
 }
