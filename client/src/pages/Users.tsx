@@ -11,7 +11,14 @@ interface UserRow {
   department: string;
   is_active: boolean;
   last_login: string | null;
+  zone_id: number | null;
   zone_name: string | null;
+}
+
+interface Zone {
+  id: number;
+  name: string;
+  code: string;
 }
 
 const ROLES = Object.keys(ROLE_LABELS);
@@ -197,16 +204,30 @@ function UserForm({
   const [password, setPassword] = useState("");
   const [role, setRole] = useState(existing?.role || "COLLECTOR");
   const [department, setDepartment] = useState(existing?.department || "");
+  const [zoneId, setZoneId] = useState(existing?.zone_id ? String(existing.zone_id) : "");
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [zonesError, setZonesError] = useState<string | null>(null);
+  const [zonesLoading, setZonesLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setZonesLoading(true);
+    api
+      .get("/zones")
+      .then((res) => setZones(res.data.zones))
+      .catch(() => setZonesError("Unable to load zones."))
+      .finally(() => setZonesLoading(false));
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
     try {
+      const zone_id = zoneId ? Number(zoneId) : null;
       if (existing) {
-        await api.patch(`/users/${existing.id}`, { full_name: fullName, role, department });
+        await api.patch(`/users/${existing.id}`, { full_name: fullName, role, department, zone_id });
         if (password) {
           await api.patch(`/users/${existing.id}/reset-password`, { new_password: password });
         }
@@ -216,7 +237,7 @@ function UserForm({
           setSubmitting(false);
           return;
         }
-        await api.post("/users", { full_name: fullName, username, password, role, department });
+        await api.post("/users", { full_name: fullName, username, password, role, department, zone_id });
       }
       onSaved();
     } catch (err: any) {
@@ -273,6 +294,30 @@ function UserForm({
           />
         </label>
       </div>
+      <label className="block">
+        <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">Zone</span>
+        {zonesError ? (
+          <p className="text-xs text-status-critical">{zonesError}</p>
+        ) : (
+          <select
+            value={zoneId}
+            onChange={(e) => setZoneId(e.target.value)}
+            disabled={zonesLoading}
+            className="w-full bg-graphite-900 border border-graphite-600 rounded-sm px-2 py-1.5 text-sm text-white disabled:opacity-50"
+          >
+            <option value="">No zone assigned</option>
+            {zonesLoading ? (
+              <option disabled>Loading zones...</option>
+            ) : zones.length === 0 ? (
+              <option disabled>No zones available.</option>
+            ) : (
+              zones.map((z) => (
+                <option key={z.id} value={z.id}>{z.code} — {z.name}</option>
+              ))
+            )}
+          </select>
+        )}
+      </label>
       <label className="block">
         <span className="block text-[11px] uppercase tracking-wider text-gray-400 mb-1">
           {existing ? "Reset password (leave blank to keep current)" : "Password"}

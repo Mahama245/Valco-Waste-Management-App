@@ -23,11 +23,17 @@ interface RouteDetail {
   name: string;
   status: string;
 }
+interface MyZone {
+  id: number;
+  name: string;
+  code: string;
+}
 
 export default function MyDay() {
   const { user } = useAuth();
   const [route, setRoute] = useState<RouteDetail | null>(null);
   const [stops, setStops] = useState<Stop[]>([]);
+  const [myZone, setMyZone] = useState<MyZone | null>(null);
   const [loading, setLoading] = useState(true);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [pendingCount, setPendingCount] = useState(getQueue().length);
@@ -55,6 +61,13 @@ export default function MyDay() {
   }, []);
 
   useEffect(load, [load]);
+
+  useEffect(() => {
+    api
+      .get("/zones/my-zone")
+      .then((res) => setMyZone(res.data.zone))
+      .catch(() => setMyZone(null));
+  }, []);
 
   const runSync = useCallback(async () => {
     if (getQueue().length === 0) return;
@@ -173,6 +186,13 @@ export default function MyDay() {
         <p className="text-sm text-gray-400">Good day,</p>
         <h1 className="font-display text-2xl font-semibold text-white">{user?.fullName.split(" ")[0]}</h1>
       </div>
+
+      {myZone && (
+        <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
+          <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">My Assigned Zone</p>
+          <p className="font-display text-lg text-white">{myZone.code} — {myZone.name}</p>
+        </div>
+      )}
 
       {loading ? (
         <p className="text-gray-500 text-sm">Loading your route...</p>

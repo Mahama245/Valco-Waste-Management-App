@@ -24,6 +24,13 @@ interface RecentCollection {
   comment: string | null;
 }
 
+interface MyZone {
+  id: number;
+  name: string;
+  code: string;
+  collector_name: string | null;
+}
+
 const CATEGORIES = [
   { value: "missed_collection", label: "Missed Collection" },
   { value: "overflowing_bin", label: "Overflowing Bin" },
@@ -35,6 +42,7 @@ const CATEGORIES = [
 export default function ResidentPortal() {
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [recent, setRecent] = useState<RecentCollection[]>([]);
+  const [myZone, setMyZone] = useState<MyZone | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -43,10 +51,12 @@ export default function ResidentPortal() {
     Promise.all([
       api.get("/complaints"),
       api.get("/confirmations/recent-in-my-zone"),
+      api.get("/zones/my-zone"),
     ])
-      .then(([c, r]) => {
+      .then(([c, r, z]) => {
         setComplaints(c.data.complaints);
         setRecent(r.data.collections);
+        setMyZone(z.data.zone);
       })
       .finally(() => setLoading(false));
   }
@@ -69,6 +79,19 @@ export default function ResidentPortal() {
         <p className="font-display text-2xl text-white">Monday</p>
         <p className="text-sm text-gray-400">7:00 AM – 9:00 AM</p>
       </div>
+
+      {myZone && (
+        <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-5">
+          <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">My Collection Area</p>
+          <p className="font-display text-xl text-white">{myZone.code} — {myZone.name}</p>
+          <p className="text-sm text-gray-400 mt-1">
+            Assigned Collector:{" "}
+            <span className={myZone.collector_name ? "text-gray-200" : "text-status-warning"}>
+              {myZone.collector_name || "Not currently assigned"}
+            </span>
+          </p>
+        </div>
+      )}
 
       {recent.length > 0 && (
         <div>
