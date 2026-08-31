@@ -33,7 +33,7 @@ export default function MyDay() {
   const { user } = useAuth();
   const [route, setRoute] = useState<RouteDetail | null>(null);
   const [stops, setStops] = useState<Stop[]>([]);
-  const [myZone, setMyZone] = useState<MyZone | null>(null);
+  const [myZones, setMyZones] = useState<MyZone[]>([]);
   const [loading, setLoading] = useState(true);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [pendingCount, setPendingCount] = useState(getQueue().length);
@@ -65,8 +65,8 @@ export default function MyDay() {
   useEffect(() => {
     api
       .get("/zones/my-zone")
-      .then((res) => setMyZone(res.data.zone))
-      .catch(() => setMyZone(null));
+      .then((res) => setMyZones(res.data.zones))
+      .catch(() => setMyZones([]));
   }, []);
 
   const runSync = useCallback(async () => {
@@ -187,10 +187,14 @@ export default function MyDay() {
         <h1 className="font-display text-2xl font-semibold text-white">{user?.fullName.split(" ")[0]}</h1>
       </div>
 
-      {myZone && (
+      {myZones.length > 0 && (
         <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
-          <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">My Assigned Zone</p>
-          <p className="font-display text-lg text-white">{myZone.code} — {myZone.name}</p>
+          <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">
+            My Assigned Zone{myZones.length > 1 ? "s" : ""}
+          </p>
+          <p className="font-display text-lg text-white">
+            {myZones.map((z) => `${z.code} — ${z.name}`).join(" · ")}
+          </p>
         </div>
       )}
 
