@@ -9,7 +9,7 @@ const ADMIN_ROLES = ["SUPER_ADMIN", "ICT_ADMIN"];
 
 router.get("/", authenticate, authorize(...ADMIN_ROLES, "WASTE_MANAGER", "SUPERVISOR"), async (_req, res) => {
   const result = await pool.query(
-    `SELECT u.id, u.full_name, u.username, u.email, u.role, u.department, u.is_active, u.last_login, z.name AS zone_name
+    `SELECT u.id, u.full_name, u.username, u.email, u.role, u.department, u.is_active, u.last_login, u.zone_id, z.name AS zone_name
      FROM users u LEFT JOIN zones z ON z.id = u.zone_id
      ORDER BY u.role, u.full_name`
   );
@@ -20,6 +20,10 @@ router.post("/", authenticate, authorize(...ADMIN_ROLES), async (req: AuthedRequ
   const { full_name, username, email, password, role, department, zone_id } = req.body || {};
   if (!full_name || !username || !password || !role) {
     return res.status(400).json({ error: "full_name, username, password, and role are required." });
+  }
+  if (zone_id) {
+    const zoneCheck = await pool.query("SELECT id FROM zones WHERE id = $1", [zone_id]);
+    if (!zoneCheck.rows[0]) return res.status(400).json({ error: "Zone not found." });
   }
   const hash = bcrypt.hashSync(password, 10);
   try {
@@ -92,6 +96,11 @@ router.patch("/:id", authenticate, authorize(...ADMIN_ROLES), async (req: Authed
 
   if (Number(req.params.id) === req.user!.id && role && role !== before.rows[0].role) {
     return res.status(400).json({ error: "You can't change your own role. Have another admin do it." });
+  }
+
+  if (zone_id !== undefined && zone_id !== null) {
+    const zoneCheck = await pool.query("SELECT id FROM zones WHERE id = $1", [zone_id]);
+    if (!zoneCheck.rows[0]) return res.status(400).json({ error: "Zone not found." });
   }
 
   const result = await pool.query(
