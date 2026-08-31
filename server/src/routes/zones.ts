@@ -59,10 +59,23 @@ router.get(
   }
 );
 
-// The logged-in user's own zone (and that zone's assigned collector), for
-// resident and collector dashboards. Returns { zone: null } if the user
-// isn't assigned to a zone.
+// The logged-in user's zone(s), for resident and collector dashboards.
+// A collector can be responsible for several zones (zones.collector_id),
+// while a resident belongs to exactly one zone (users.zone_id) — so this
+// looks up the relationship that actually applies to the caller's role.
+// Always returns { zones: [...] } (possibly empty).
 router.get("/my-zone", authenticate, async (req: AuthedRequest, res) => {
+  if (req.user!.role === "COLLECTOR") {
+    const result = await pool.query(
+      `SELECT z.id, z.name, z.code, z.description
+       FROM zones z
+       WHERE z.collector_id = $1
+       ORDER BY z.name`,
+      [req.user!.id]
+    );
+    return res.json({ zones: result.rows });
+  }
+
   const result = await pool.query(
     `SELECT z.id, z.name, z.code, z.description, cu.full_name AS collector_name
      FROM users u
@@ -71,7 +84,7 @@ router.get("/my-zone", authenticate, async (req: AuthedRequest, res) => {
      WHERE u.id = $1`,
     [req.user!.id]
   );
-  res.json({ zone: result.rows[0] || null });
+  res.json({ zones: result.rows });
 });
 
 // Assign (or reassign) the collector responsible for a zone. Residents keep
