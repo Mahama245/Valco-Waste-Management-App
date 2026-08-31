@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
 
 interface ZoneOverview {
@@ -54,13 +55,21 @@ export default function ZoneManagement() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Administration</p>
-        <h1 className="font-display text-2xl font-semibold text-white">Zone &amp; Collector Management</h1>
-        <p className="text-sm text-gray-400 mt-1">
-          Each zone groups residents under a single operational area. Assign a collector to make them
-          responsible for that zone's residents and collections.
-        </p>
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.2em] text-gold-500 mb-1">Administration</p>
+          <h1 className="font-display text-2xl font-semibold text-white">Zone &amp; Collector Management</h1>
+          <p className="text-sm text-gray-400 mt-1">
+            Each zone groups residents under a single operational area. Assign a collector to make them
+            responsible for that zone's residents and collections.
+          </p>
+        </div>
+        <Link
+          to="/zones/print-qr"
+          className="text-sm bg-graphite-800 hover:bg-graphite-700 border border-graphite-700 text-gray-200 font-medium px-4 py-2 rounded-sm shrink-0"
+        >
+          🖨 Print Zone QR Codes
+        </Link>
       </div>
 
       {banner && (

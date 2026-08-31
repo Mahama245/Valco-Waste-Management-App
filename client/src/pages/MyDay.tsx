@@ -27,6 +27,8 @@ interface MyZone {
   id: number;
   name: string;
   code: string;
+  resident_count?: number;
+  collected_today?: boolean;
 }
 
 export default function MyDay() {
@@ -40,6 +42,16 @@ export default function MyDay() {
   const [syncing, setSyncing] = useState(false);
   const [scanningStop, setScanningStop] = useState<Stop | null>(null);
   const [scanMismatch, setScanMismatch] = useState<{ stop: Stop; scannedCode: string } | null>(null);
+  const [scanningZone, setScanningZone] = useState<MyZone | null>(null);
+  const [zoneScanBanner, setZoneScanBanner] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [zoneScanBusy, setZoneScanBusy] = useState(false);
+
+  const loadMyZones = useCallback(() => {
+    api
+      .get("/zones/my-zone")
+      .then((res) => setMyZones(res.data.zones))
+      .catch(() => setMyZones([]));
+  }, []);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -61,13 +73,33 @@ export default function MyDay() {
   }, []);
 
   useEffect(load, [load]);
+  useEffect(loadMyZones, [loadMyZones]);
 
-  useEffect(() => {
-    api
-      .get("/zones/my-zone")
-      .then((res) => setMyZones(res.data.zones))
-      .catch(() => setMyZones([]));
-  }, []);
+  async function completeZoneScan(zone: MyZone, scannedCode: string) {
+    setZoneScanBusy(true);
+    try {
+      const res = await api.post(`/zones/${zone.id}/scan-complete`, { scanned_code: scannedCode });
+      setZoneScanBanner({
+        type: "success",
+        text: res.data.alreadyRecorded
+          ? `${zone.name} was already recorded as collected today.`
+          : `${zone.name} recorded as collected today.`,
+      });
+      loadMyZones();
+    } catch (err: any) {
+      setZoneScanBanner({
+        type: "error",
+        text: err.response?.data?.error || "Unable to record this collection. Please try again.",
+      });
+    } finally {
+      setZoneScanBusy(false);
+    }
+  }
+
+  function handleZoneScanResult(code: string) {
+    if (scanningZone) completeZoneScan(scanningZone, code);
+    setScanningZone(null);
+  }
 
   const runSync = useCallback(async () => {
     if (getQueue().length === 0) return;
@@ -182,6 +214,30 @@ export default function MyDay() {
         </div>
       )}
 
+      {scanningZone && (
+        <QrScanner
+          onScan={handleZoneScanResult}
+          onClose={() => setScanningZone(null)}
+          label={`Scan QR for ${scanningZone.name}`}
+          hint="Point your camera at the zone's posted QR code."
+        />
+      )}
+
+      {zoneScanBanner && (
+        <div
+          className={`text-xs px-3 py-2 rounded-sm border text-center flex items-center justify-center gap-2 ${
+            zoneScanBanner.type === "success"
+              ? "bg-status-successBg border-status-success/30 text-status-success"
+              : "bg-status-criticalBg border-status-critical/30 text-status-critical"
+          }`}
+        >
+          {zoneScanBanner.text}
+          <button onClick={() => setZoneScanBanner(null)} className="underline shrink-0">
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div>
         <p className="text-sm text-gray-400">Good day,</p>
         <h1 className="font-display text-2xl font-semibold text-white">{user?.fullName.split(" ")[0]}</h1>
@@ -189,12 +245,38 @@ export default function MyDay() {
 
       {myZones.length > 0 && (
         <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-4">
-          <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-1">
+          <p className="text-[11px] uppercase tracking-wider text-gray-400 mb-2">
             My Assigned Zone{myZones.length > 1 ? "s" : ""}
           </p>
-          <p className="font-display text-lg text-white">
-            {myZones.map((z) => `${z.code} — ${z.name}`).join(" · ")}
-          </p>
+          <div className="space-y-2">
+            {myZones.map((z) => (
+              <div
+                key={z.id}
+                className="flex items-center justify-between bg-graphite-900 border border-graphite-700 rounded-sm px-3 py-2 gap-3"
+              >
+                <div className="min-w-0">
+                  <span className="font-mono text-xs text-gold-500 mr-2">{z.code}</span>
+                  <span className="text-sm text-white">{z.name}</span>
+                  {z.resident_count !== undefined && (
+                    <p className="text-[11px] text-gray-500 mt-0.5">{z.resident_count} residents</p>
+                  )}
+                </div>
+                {z.collected_today ? (
+                  <span className="shrink-0 text-[11px] uppercase px-2 py-1 rounded-sm bg-status-successBg text-status-success">
+                    ✓ Collected Today
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => setScanningZone(z)}
+                    disabled={zoneScanBusy}
+                    className="shrink-0 text-xs bg-graphite-700 hover:bg-graphite-600 text-gray-200 px-3 py-2 rounded-sm flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    📷 Scan to Complete
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
