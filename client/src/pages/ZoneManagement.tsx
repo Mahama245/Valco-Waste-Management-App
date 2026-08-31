@@ -10,6 +10,7 @@ interface ZoneOverview {
   collector_id: number | null;
   collector_name: string | null;
   resident_count: number;
+  collected_today: boolean;
 }
 
 interface Collector {
@@ -84,6 +85,33 @@ export default function ZoneManagement() {
         </div>
       )}
 
+      {!loading && zones.length > 0 && (
+        <div className="bg-graphite-800 border border-graphite-700 rounded-sm p-4 flex items-center gap-6 flex-wrap">
+          {(() => {
+            const assigned = zones.filter((z) => z.collector_id);
+            const collected = assigned.filter((z) => z.collected_today).length;
+            const notYet = assigned.length - collected;
+            return (
+              <>
+                <div>
+                  <p className="text-[11px] uppercase tracking-wider text-gray-400">Collected Today</p>
+                  <p className="font-display text-2xl text-status-success">{collected} / {assigned.length}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] uppercase tracking-wider text-gray-400">Not Yet Collected</p>
+                  <p className={`font-display text-2xl ${notYet > 0 ? "text-status-warning" : "text-gray-500"}`}>
+                    {notYet}
+                  </p>
+                </div>
+                <p className="text-xs text-gray-500 max-w-xs">
+                  Reflects scans recorded so far today — updates live as collectors scan their zone QR codes.
+                </p>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
       {error && <div className="text-status-critical text-sm">{error}</div>}
 
       {loading ? (
@@ -113,12 +141,21 @@ export default function ZoneManagement() {
               <p className="text-sm text-gray-300 mb-1">
                 Residents: <span className="text-white">{z.resident_count}</span>
               </p>
-              <p className="text-sm text-gray-300 mb-4">
+              <p className="text-sm text-gray-300 mb-1">
                 Assigned Collector:{" "}
                 <span className={z.collector_name ? "text-white" : "text-status-warning"}>
                   {z.collector_name || "UNASSIGNED"}
                 </span>
               </p>
+              {z.collector_id && (
+                <p className="text-sm mb-4">
+                  Today:{" "}
+                  <span className={z.collected_today ? "text-status-success" : "text-status-warning"}>
+                    {z.collected_today ? "✓ Collected" : "Not yet collected"}
+                  </span>
+                </p>
+              )}
+              {!z.collector_id && <div className="mb-4" />}
 
               <button
                 onClick={() => setAssigningZone(z)}
